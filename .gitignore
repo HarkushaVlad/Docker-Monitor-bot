@@ -1,0 +1,7 @@
+vendor/
+go.sum
+
+.env
+.history
+
+docker-monitor-bot

@@ -111,13 +111,14 @@ func initDockerClient() error {
 }
 
 func sendTelegramNotification(message string) {
-	msg := tgbotapi.NewMessage(telegramChatID, message)
-	msg.ParseMode = tgbotapi.ModeMarkdownV2
+	validString := strings.ToValidUTF8(message, "")
+	msg := tgbotapi.NewMessage(telegramChatID, validString)
+	msg.ParseMode = tgbotapi.ModeHTML
 	_, err := telegramBot.Send(msg)
 	if err != nil {
 		log.Printf("Error sending Telegram notification: %v", err)
 	} else {
-		log.Printf("Notification sent: %s", message)
+		log.Println("Telegram notification sent")
 	}
 }
 
@@ -174,13 +175,17 @@ func monitorContainerLogs(ctx context.Context) {
 					}
 					out, err := dockerClient.ContainerLogs(ctx, c.ID, options)
 					if err != nil {
-						log.Printf("Error fetching logs for container %s: %v", c.Names[0], err)
+						log.Printf("Error fetching logs for container %s: %v", strings.TrimPrefix(c.Names[0], "/"), err)
 						return
 					}
-					defer out.Close()
+					defer func() {
+						if err := out.Close(); err != nil {
+							log.Printf("Error closing log stream for container %s: %v", strings.TrimPrefix(c.Names[0], "/"), err)
+						}
+					}()
 
 					scanner := bufio.NewScanner(out)
-					errors := []string{}
+					var errors []string
 					for scanner.Scan() {
 						line := scanner.Text()
 						if errorRegex.MatchString(line) {
@@ -189,17 +194,31 @@ func monitorContainerLogs(ctx context.Context) {
 					}
 
 					if len(errors) > 0 {
+						var errorMessages []string
+
+						for _, errLine := range errors[:min(3, len(errors))] {
+							filteredString := removeControlCharactersRegex(strings.ToValidUTF8(errLine, ""))
+							errorMessages = append(errorMessages, fmt.Sprintf("<pre>%s</pre>", filteredString))
+						}
+
 						message := fmt.Sprintf(
 							translations["docker_container_errors"],
-							c.Names[0],
-							strings.Join(errors[:min(3, len(errors))], "\n"),
+							strings.TrimPrefix(c.Names[0], "/"),
+							strings.Join(errorMessages, ""),
 						)
-						log.Printf("Errors detected in container %s: %s", c.Names[0], strings.Join(errors, ", "))
+
+						log.Printf("\n\n%s\n\n", strings.Join(errorMessages, ""))
+
+						log.Printf("Errors detected in container %s:\n%s",
+							strings.TrimPrefix(c.Names[0], "/"),
+							strings.Join(errors, "\n"),
+						)
+
 						sendTelegramNotification(message)
 					}
 
 					if err := scanner.Err(); err != nil {
-						log.Printf("Error scanning logs for container %s: %v", c.Names[0], err)
+						log.Printf("Error scanning logs for container %s: %v", strings.TrimPrefix(c.Names[0], "/"), err)
 					}
 				}(container)
 			}
@@ -234,26 +253,29 @@ func handleCheckCommand(update tgbotapi.Update) {
 			status = "🔴 Stopped"
 		}
 		statusLines = append(statusLines, fmt.Sprintf(
-			"```\n"+
-				"┌ ID: %s\n"+
-				"├ Name: %s\n"+
-				"├ Status: %s\n"+
-				"└ Image: %s\n"+
-				"```",
+			"<pre>┌ ID: %s\n├ Name: %s\n├ Status: %s\n└ Image: %s\n</pre>",
 			container.ID[:12],
-			container.Names[0],
+			strings.TrimPrefix(container.Names[0], "/"),
 			status,
 			container.Image,
 		))
 	}
 
-	reply := strings.Join(statusLines, "\n")
-	msg := tgbotapi.NewMessage(telegramChatID, reply)
-	msg.ParseMode = tgbotapi.ModeMarkdownV2
-	_, err = telegramBot.Send(msg)
-	if err != nil {
-		log.Printf("Error sending /check response: %v", err)
+	reply := strings.Join(statusLines, "")
+	sendTelegramNotification(reply)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
+	return b
+}
+
+func removeControlCharactersRegex(s string) string {
+	// [\x00-\x08], [\x0B-\x0C], and [\x0E-\x1F]
+	re := regexp.MustCompile(`[\x00-\x08\x0B\x0C\x0E-\x1F]`)
+	return re.ReplaceAllString(s, "")
 }
 
 func main() {
@@ -275,9 +297,7 @@ func main() {
 	go monitorDockerEvents(ctx)
 	go monitorContainerLogs(ctx)
 
-	updates := telegramBot.GetUpdatesChan(tgbotapi.UpdateConfig{
-		Timeout: 60,
-	})
+	updates := telegramBot.GetUpdatesChan(tgbotapi.UpdateConfig{Timeout: 60})
 
 	go func() {
 		for update := range updates {

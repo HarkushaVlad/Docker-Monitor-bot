@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"os"
 	"regexp"
@@ -28,6 +29,7 @@ var (
 	telegramChatID int64
 	dockerClient   *client.Client
 	pollInterval   time.Duration
+	tailCount      string
 	translations   map[string]string
 )
 
@@ -75,6 +77,12 @@ func loadConfig() error {
 		} else {
 			pollInterval = time.Duration(seconds) * time.Second
 		}
+	}
+
+	tailCountStr := os.Getenv("TAIL_COUNT")
+	tailCountNum, err := strconv.Atoi(tailCountStr)
+	if err != nil || tailCountNum <= 0 {
+		tailCount = "100"
 	}
 
 	lang := os.Getenv("LANGUAGE")
@@ -152,10 +160,12 @@ func monitorDockerEvents(ctx context.Context) {
 }
 
 func monitorContainerLogs(ctx context.Context) {
+	tailCountOption := tailCount
+	lastMarkers := make(map[string]string)
+	errorRegex := regexp.MustCompile(`(?i)error`)
+
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
-
-	errorRegex := regexp.MustCompile(`(?i)error`)
 
 	for {
 		select {
@@ -171,8 +181,9 @@ func monitorContainerLogs(ctx context.Context) {
 					options := types.ContainerLogsOptions{
 						ShowStdout: true,
 						ShowStderr: true,
-						Tail:       "50",
+						Tail:       tailCountOption,
 					}
+
 					out, err := dockerClient.ContainerLogs(ctx, c.ID, options)
 					if err != nil {
 						log.Printf("Error fetching logs for container %s: %v", strings.TrimPrefix(c.Names[0], "/"), err)
@@ -185,40 +196,68 @@ func monitorContainerLogs(ctx context.Context) {
 					}()
 
 					scanner := bufio.NewScanner(out)
-					var errors []string
+					var lines []string
+					var lineHashes []string
 					for scanner.Scan() {
 						line := scanner.Text()
-						if errorRegex.MatchString(line) {
-							errors = append(errors, line)
-						}
+						lines = append(lines, line)
+						lineHashes = append(lineHashes, hashString(line))
 					}
-
-					if len(errors) > 0 {
-						var errorMessages []string
-
-						for _, errLine := range errors[:min(3, len(errors))] {
-							filteredString := removeControlCharactersRegex(strings.ToValidUTF8(errLine, ""))
-							errorMessages = append(errorMessages, fmt.Sprintf("<pre>%s</pre>", filteredString))
-						}
-
-						message := fmt.Sprintf(
-							translations["docker_container_errors"],
-							strings.TrimPrefix(c.Names[0], "/"),
-							strings.Join(errorMessages, ""),
-						)
-
-						log.Printf("\n\n%s\n\n", strings.Join(errorMessages, ""))
-
-						log.Printf("Errors detected in container %s:\n%s",
-							strings.TrimPrefix(c.Names[0], "/"),
-							strings.Join(errors, "\n"),
-						)
-
-						sendTelegramNotification(message)
-					}
-
 					if err := scanner.Err(); err != nil {
 						log.Printf("Error scanning logs for container %s: %v", strings.TrimPrefix(c.Names[0], "/"), err)
+						return
+					}
+
+					storedMarker, exists := lastMarkers[c.ID]
+					startIndex := 0
+
+					if exists && storedMarker != "" {
+						found := false
+						for i, h := range lineHashes {
+							if h == storedMarker {
+								startIndex = i + 1
+								found = true
+								break
+							}
+						}
+
+						if !found {
+							startIndex = 0
+						}
+					}
+
+					if startIndex < len(lines) {
+						newLines := lines[startIndex:]
+
+						var errors []string
+						for _, line := range newLines {
+							if errorRegex.MatchString(line) {
+								errors = append(errors, line)
+							}
+						}
+
+						if len(errors) > 0 {
+							var errorMessages []string
+							for _, errLine := range errors[:min(3, len(errors))] {
+								filteredString := removeControlCharactersRegex(strings.ToValidUTF8(errLine, ""))
+								errorMessages = append(errorMessages, fmt.Sprintf("<pre>%s</pre>", filteredString))
+							}
+
+							message := fmt.Sprintf(
+								translations["docker_container_errors"],
+								strings.TrimPrefix(c.Names[0], "/"),
+								strings.Join(errorMessages, ""),
+							)
+
+							log.Printf("Errors detected in container %s:\n%s",
+								strings.TrimPrefix(c.Names[0], "/"),
+								strings.Join(errors, "\n"),
+							)
+
+							sendTelegramNotification(message)
+						}
+
+						lastMarkers[c.ID] = lineHashes[len(lineHashes)-1]
 					}
 				}(container)
 			}
@@ -276,6 +315,12 @@ func removeControlCharactersRegex(s string) string {
 	// [\x00-\x08], [\x0B-\x0C], and [\x0E-\x1F]
 	re := regexp.MustCompile(`[\x00-\x08\x0B\x0C\x0E-\x1F]`)
 	return re.ReplaceAllString(s, "")
+}
+
+func hashString(s string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(s))
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 func main() {

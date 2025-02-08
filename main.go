@@ -138,6 +138,17 @@ func monitorDockerEvents(ctx context.Context) {
 		select {
 		case event := <-eventCh:
 			if event.Type == events.ContainerEventType {
+				if event.Status == "start" {
+					message := fmt.Sprintf(
+						translations["docker_container_started"],
+						event.ID[:12],
+						event.Actor.Attributes["name"],
+					)
+					log.Printf("Container started: ID=%s, Name=%s",
+						event.ID[:12], event.Actor.Attributes["name"])
+					sendTelegramNotification(message)
+				}
+
 				if event.Status == "die" || event.Status == "oom" {
 					message := fmt.Sprintf(
 						translations["docker_container_stopped"],
@@ -145,7 +156,7 @@ func monitorDockerEvents(ctx context.Context) {
 						event.Actor.Attributes["name"],
 						event.Status,
 					)
-					log.Printf("Docker event detected: ID=%s, Name=%s, Status=%s",
+					log.Printf("Container stopped: ID=%s, Name=%s, Status=%s",
 						event.ID[:12], event.Actor.Attributes["name"], event.Status)
 					sendTelegramNotification(message)
 				}
@@ -284,19 +295,37 @@ func handleCheckCommand(update tgbotapi.Update) {
 		return
 	}
 
+	var runningContainers []types.Container
+	var stoppedContainers []types.Container
+
+	for _, container := range containers {
+		if container.State == "running" {
+			runningContainers = append(runningContainers, container)
+		} else {
+			stoppedContainers = append(stoppedContainers, container)
+		}
+	}
+
 	var statusLines []string
 	statusLines = append(statusLines, translations["containers_status"])
-	for _, container := range containers {
-		status := "🟢 Running"
-		if container.State != "running" {
-			status = "🔴 Stopped"
-		}
+
+	for _, container := range runningContainers {
 		statusLines = append(statusLines, fmt.Sprintf(
-			"<pre>┌ ID: %s\n├ Name: %s\n├ Status: %s\n└ Image: %s\n</pre>",
+			"<pre>┌ ID: %s\n├ Name: %s\n├ Status: 🟢 Running\n├ Image: %s\n└ Started: %s</pre>",
 			container.ID[:12],
 			strings.TrimPrefix(container.Names[0], "/"),
-			status,
 			container.Image,
+			time.Unix(container.Created, 0).Format("2006-01-02 15:04:05"),
+		))
+	}
+
+	for _, container := range stoppedContainers {
+		statusLines = append(statusLines, fmt.Sprintf(
+			"<pre>┌ ID: %s\n├ Name: %s\n├ Status: 🔴 Stopped\n└ Image: %s\n└ Started: %s</pre>",
+			container.ID[:12],
+			strings.TrimPrefix(container.Names[0], "/"),
+			container.Image,
+			time.Unix(container.Created, 0).Format("2006-01-02 15:04:05"),
 		))
 	}
 

@@ -1,4 +1,4 @@
-module github.com/yourusername/docker-monitor-bot
+module github.com/HarkushaVlad/docker-monitor-bot
 
 go 1.23.6
 

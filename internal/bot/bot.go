@@ -26,27 +26,61 @@ type TelegramNotifier struct {
 	Bot *tgbotapi.BotAPI
 }
 
-func (tn *TelegramNotifier) SendText(chatID int64, message string) {
+func (n *TelegramNotifier) SendText(chatID int64, message string) int {
 	validMessage := strings.ToValidUTF8(message, "")
 	msg := tgbotapi.NewMessage(chatID, validMessage)
 	msg.ParseMode = tgbotapi.ModeHTML
-	_, err := tn.Bot.Send(msg)
+	sentMsg, err := n.Bot.Send(msg)
 	if err != nil {
-		log.Printf("Error sending Telegram notification: %v", err)
-	} else {
-		log.Println("Telegram notification sent")
+		log.Printf("Error sending message: %v", err)
+		return 0
 	}
+	return sentMsg.MessageID
 }
 
-func (tn *TelegramNotifier) SendTextWithKeyboard(chatID int64, message string, keyboard tgbotapi.InlineKeyboardMarkup) {
+func (n *TelegramNotifier) SendTextWithKeyboard(chatID int64, message string, keyboard tgbotapi.InlineKeyboardMarkup) int {
 	validMessage := strings.ToValidUTF8(message, "")
 	msg := tgbotapi.NewMessage(chatID, validMessage)
 	msg.ParseMode = tgbotapi.ModeHTML
 	msg.ReplyMarkup = keyboard
-	_, err := tn.Bot.Send(msg)
+	sentMsg, err := n.Bot.Send(msg)
 	if err != nil {
-		log.Printf("Error sending Telegram notification with keyboard: %v", err)
-	} else {
-		log.Println("Telegram notification with keyboard sent")
+		log.Printf("Error sending message with keyboard: %v", err)
+		return 0
+	}
+	return sentMsg.MessageID
+}
+
+func (n *TelegramNotifier) EditMessageText(chatID int64, messageID int, text string) {
+	validText := strings.ToValidUTF8(text, "")
+	editMsg := tgbotapi.NewEditMessageText(chatID, messageID, validText)
+	editMsg.ParseMode = tgbotapi.ModeHTML
+	_, err := n.Bot.Send(editMsg)
+	if err != nil {
+		log.Printf("Error editing message: %v", err)
+	}
+}
+
+func (n *TelegramNotifier) EditMessageWithKeyboard(chatID int64, messageID int, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
+	validText := strings.ToValidUTF8(text, "")
+	editMsg := tgbotapi.NewEditMessageTextAndMarkup(chatID, messageID, validText, keyboard)
+	editMsg.ParseMode = tgbotapi.ModeHTML
+	_, err := n.Bot.Send(editMsg)
+	if err != nil {
+		log.Printf("Error editing message with keyboard: %v", err)
+	}
+}
+
+func (n *TelegramNotifier) AnswerCallbackQuery(callbackID string, text string) {
+	answer := tgbotapi.NewCallback(callbackID, text)
+	if _, err := n.Bot.Request(answer); err != nil {
+		log.Printf("Error answering callback: %v", err)
+	}
+}
+
+func (n *TelegramNotifier) DeleteMessage(chatID int64, messageID int) {
+	deleteMsg := tgbotapi.NewDeleteMessage(chatID, messageID)
+	if _, err := n.Bot.Request(deleteMsg); err != nil {
+		log.Printf("Error deleting message: %v", err)
 	}
 }

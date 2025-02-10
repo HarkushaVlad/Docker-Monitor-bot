@@ -4,6 +4,7 @@ import (
 	"hash/fnv"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 func HashString(s string) string {
@@ -22,4 +23,13 @@ func Min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func EscapeHTML(text string) string {
+	replacer := strings.NewReplacer(
+		"<", "&lt;",
+		">", "&gt;",
+		"&", "&amp;",
+	)
+	return replacer.Replace(text)
 }

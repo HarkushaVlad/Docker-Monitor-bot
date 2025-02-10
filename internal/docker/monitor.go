@@ -134,12 +134,14 @@ func MonitorContainerLogs(ctx context.Context, pollInterval time.Duration, tailC
 							var errorMessages []string
 							for _, errLine := range errors[:utils.Min(3, len(errors))] {
 								filteredString := utils.RemoveControlCharactersRegex(strings.ToValidUTF8(errLine, ""))
-								errorMessages = append(errorMessages, fmt.Sprintf("<pre>%s</pre>", filteredString))
+								escapedString := utils.EscapeHTML(filteredString)
+								errorMessages = append(errorMessages, fmt.Sprintf("<pre>%s</pre>", escapedString))
 							}
+
 							message := fmt.Sprintf(
 								"🚨 <b>Container <u>%s</u> encountered errors:</b>\n\n%s",
 								strings.TrimPrefix(c.Names[0], "/"),
-								strings.Join(errorMessages, ""),
+								errorMessages,
 							)
 							log.Printf("Errors detected in container %s:\n%s",
 								strings.TrimPrefix(c.Names[0], "/"),

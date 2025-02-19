@@ -79,6 +79,10 @@ func MonitorContainerLogs(ctx context.Context, pollInterval time.Duration, tailC
 			}
 
 			for _, container := range containers {
+				if container.State != "running" {
+					continue
+				}
+
 				go func(c types.Container) {
 					options := types.ContainerLogsOptions{
 						ShowStdout: true,
@@ -141,7 +145,7 @@ func MonitorContainerLogs(ctx context.Context, pollInterval time.Duration, tailC
 							message := fmt.Sprintf(
 								"🚨 <b>Container <u>%s</u> encountered errors:</b>\n\n%s",
 								strings.TrimPrefix(c.Names[0], "/"),
-								errorMessages,
+								strings.Join(errorMessages, "\n"),
 							)
 							log.Printf("Errors detected in container %s:\n%s",
 								strings.TrimPrefix(c.Names[0], "/"),

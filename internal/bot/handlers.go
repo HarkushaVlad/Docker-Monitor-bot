@@ -13,6 +13,7 @@ import (
 
 	"github.com/HarkushaVlad/docker-monitor-bot/internal/docker"
 	"github.com/HarkushaVlad/docker-monitor-bot/internal/notification"
+	"github.com/HarkushaVlad/docker-monitor-bot/internal/utils"
 )
 
 const itemsPerPage = 6
@@ -98,7 +99,14 @@ func HandleCheckCommand(chatID int64, notifier notification.Notifier, state *Bot
 		return
 	}
 
-	if len(containers) == 0 {
+	var userContainers []types.Container
+	for _, c := range containers {
+		if utils.IsUserContainer(c) {
+			userContainers = append(userContainers, c)
+		}
+    }
+
+	if len(userContainers) == 0 {
 		editOrSendMessage(chatID, state.LastMessageID, "🔍 <b>No containers are running</b>", notifier)
 		return
 	}
@@ -106,7 +114,7 @@ func HandleCheckCommand(chatID int64, notifier notification.Notifier, state *Bot
 	var statusLines []string
 	statusLines = append(statusLines, "📊 <b>Containers Status:</b>\n\n")
 
-	for _, container := range containers {
+	for _, container := range userContainers {
 		statusLines = append(statusLines, formatContainerInfo(container))
 	}
 
@@ -122,16 +130,23 @@ func showContainerList(chatID int64, state *BotState, notifier notification.Noti
 		return
 	}
 
-	totalPages := (len(containers)-1)/itemsPerPage + 1
+	var userContainers []types.Container
+    for _, c := range containers {
+        if utils.IsUserContainer(c) {
+            userContainers = append(userContainers, c)
+        }
+    }
+
+	totalPages := (len(userContainers)-1)/itemsPerPage + 1
 	start := state.CurrentPage * itemsPerPage
 	end := start + itemsPerPage
-	if end > len(containers) {
-		end = len(containers)
+	if end > len(userContainers) {
+		end = len(userContainers)
 	}
 
 	state.ShortIDMap = make(map[string]string)
 	var buttons []tgbotapi.InlineKeyboardButton
-	for _, container := range containers[start:end] {
+	for _, container := range userContainers[start:end] {
 		shortID := container.ID[:12]
 		state.ShortIDMap[shortID] = container.ID
 
@@ -163,7 +178,7 @@ func showContainerList(chatID int64, state *BotState, notifier notification.Noti
 	}
 
 	keyboard := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
-	msgText := fmt.Sprintf("📦 Containers (%d-%d of %d):", start+1, end, len(containers))
+	msgText := fmt.Sprintf("📦 Containers (%d-%d of %d):", start+1, end, len(userContainers))
 
 	if state.LastMessageID == 0 {
 		state.LastMessageID = notifier.SendTextWithKeyboard(chatID, msgText, keyboard)

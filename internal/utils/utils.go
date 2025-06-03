@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/docker/docker/api/types"
 )
 
 func HashString(s string) string {
@@ -32,4 +34,18 @@ func EscapeHTML(text string) string {
 		"&", "&amp;",
 	)
 	return replacer.Replace(text)
+}
+
+func IsUserContainer(container types.Container) bool {
+    matched, _ := regexp.MatchString(`^[a-f0-9]{12}$`, container.Image)
+
+    if matched || strings.HasPrefix(container.Image, "sha256:") {
+		name := strings.Trim(container.Names[0], "/")
+		parts := strings.Split(name, "_")
+		if len(parts) == 2 {
+			return false
+		}
+    }
+
+    return true
 }

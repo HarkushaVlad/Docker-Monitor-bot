@@ -7,47 +7,31 @@ import (
 	"github.com/HarkushaVlad/docker-monitor-bot/internal/bot"
 	"github.com/HarkushaVlad/docker-monitor-bot/internal/config"
 	"github.com/HarkushaVlad/docker-monitor-bot/internal/docker"
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func main() {
-	cfg, err := config.LoadConfig()
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Error loading configuration: %v", err)
+		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	if err := bot.InitTelegramBot(); err != nil {
-		log.Fatalf("Failed to initialize Telegram bot: %v", err)
+	dockerSvc, err := docker.NewService()
+	if err != nil {
+		log.Fatalf("Failed to init Docker client: %v", err)
 	}
 
-	notifier := &bot.TelegramNotifier{Bot: bot.TelegramBot}
-
-	if err := docker.InitDockerClient(); err != nil {
-		log.Fatalf("Failed to initialize Docker client: %v", err)
+	b, err := bot.New(cfg.TelegramBotToken, dockerSvc, cfg.TelegramChatID)
+	if err != nil {
+		log.Fatalf("Failed to init Telegram bot: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go docker.MonitorDockerEvents(ctx, cfg.TelegramChatID, notifier)
+	notifier := b.Notifier()
+	go dockerSvc.MonitorEvents(ctx, cfg.TelegramChatID, notifier)
+	go dockerSvc.MonitorLogs(ctx, cfg.PollInterval, cfg.TailCount, cfg.TelegramChatID, notifier)
 
-	go docker.MonitorContainerLogs(ctx, cfg.PollInterval, cfg.TailCount, cfg.TelegramChatID, notifier)
-
-	go func() {
-		u := tgbotapi.NewUpdate(0)
-		u.Timeout = 60
-		updates := bot.TelegramBot.GetUpdatesChan(u)
-
-		for update := range updates {
-			if update.CallbackQuery != nil {
-				bot.HandleCallbackQuery(bot.TelegramBot, update.CallbackQuery, notifier)
-			}
-			if update.Message != nil && update.Message.IsCommand() && update.Message.Chat.ID == cfg.TelegramChatID {
-				bot.HandleCommand(bot.TelegramBot, update.Message, notifier)
-			}
-		}
-	}()
-
-	log.Println("Docker monitoring bot started...")
-	select {}
+	log.Println("Docker monitoring bot started")
+	b.Run()
 }

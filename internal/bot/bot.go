@@ -3,84 +3,132 @@ package bot
 import (
 	"fmt"
 	"log"
-	"os"
 	"strings"
+	"sync"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"github.com/HarkushaVlad/docker-monitor-bot/internal/docker"
+	"github.com/HarkushaVlad/docker-monitor-bot/internal/notification"
 )
 
-var TelegramBot *tgbotapi.BotAPI
+type Bot struct {
+	api      *tgbotapi.BotAPI
+	Docker   *docker.Service
+	ChatID   int64
+	notifier notification.Notifier
+	states   map[int64]*State
+	mu       sync.Mutex
+}
 
-func InitTelegramBot() error {
-	var err error
-	TelegramBot, err = tgbotapi.NewBotAPI(os.Getenv("TELEGRAM_BOT_TOKEN"))
+func New(token string, dockerSvc *docker.Service, chatID int64) (*Bot, error) {
+	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		return fmt.Errorf("failed to initialize Telegram bot: %v", err)
+		return nil, fmt.Errorf("failed to init telegram bot: %v", err)
 	}
-	TelegramBot.Debug = false
-	log.Printf("Logged in as: %s", TelegramBot.Self.UserName)
-	return nil
+	api.Debug = false
+	log.Printf("Telegram bot: @%s", api.Self.UserName)
+
+	b := &Bot{
+		api:    api,
+		Docker: dockerSvc,
+		ChatID: chatID,
+		states: make(map[int64]*State),
+	}
+	b.notifier = &telegramNotifier{api: api}
+	return b, nil
 }
 
-type TelegramNotifier struct {
-	Bot *tgbotapi.BotAPI
+func (b *Bot) Notifier() notification.Notifier {
+	return b.notifier
 }
 
-func (n *TelegramNotifier) SendText(chatID int64, message string) int {
-	validMessage := strings.ToValidUTF8(message, "")
-	msg := tgbotapi.NewMessage(chatID, validMessage)
+func (b *Bot) Run() {
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 60
+	updates := b.api.GetUpdatesChan(u)
+
+	for update := range updates {
+		switch {
+		case update.CallbackQuery != nil:
+			b.handleCallback(update.CallbackQuery)
+		case update.Message != nil && update.Message.IsCommand():
+			if update.Message.Chat.ID == b.ChatID {
+				b.handleCommand(update.Message)
+			}
+		}
+	}
+}
+
+func (b *Bot) getState(chatID int64) *State {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if s, ok := b.states[chatID]; ok {
+		return s
+	}
+	s := &State{
+		View:       viewMain,
+		ShortIDMap: make(map[string]string),
+		ProjectMap: make(map[int]string),
+	}
+	b.states[chatID] = s
+	return s
+}
+
+type telegramNotifier struct {
+	api *tgbotapi.BotAPI
+}
+
+func (n *telegramNotifier) SendText(chatID int64, message string) int {
+	msg := tgbotapi.NewMessage(chatID, strings.ToValidUTF8(message, ""))
 	msg.ParseMode = tgbotapi.ModeHTML
-	sentMsg, err := n.Bot.Send(msg)
+	sent, err := n.api.Send(msg)
 	if err != nil {
 		log.Printf("Error sending message: %v", err)
 		return 0
 	}
-	return sentMsg.MessageID
+	return sent.MessageID
 }
 
-func (n *TelegramNotifier) SendTextWithKeyboard(chatID int64, message string, keyboard tgbotapi.InlineKeyboardMarkup) int {
-	validMessage := strings.ToValidUTF8(message, "")
-	msg := tgbotapi.NewMessage(chatID, validMessage)
+func (n *telegramNotifier) SendTextWithKeyboard(chatID int64, message string, keyboard tgbotapi.InlineKeyboardMarkup) int {
+	msg := tgbotapi.NewMessage(chatID, strings.ToValidUTF8(message, ""))
 	msg.ParseMode = tgbotapi.ModeHTML
 	msg.ReplyMarkup = keyboard
-	sentMsg, err := n.Bot.Send(msg)
+	sent, err := n.api.Send(msg)
 	if err != nil {
-		log.Printf("Error sending message with keyboard: %v", err)
+		log.Printf("Error sending message: %v", err)
 		return 0
 	}
-	return sentMsg.MessageID
+	return sent.MessageID
 }
 
-func (n *TelegramNotifier) EditMessageText(chatID int64, messageID int, text string) {
-	validText := strings.ToValidUTF8(text, "")
-	editMsg := tgbotapi.NewEditMessageText(chatID, messageID, validText)
-	editMsg.ParseMode = tgbotapi.ModeHTML
-	_, err := n.Bot.Send(editMsg)
-	if err != nil {
+func (n *telegramNotifier) EditMessageText(chatID int64, messageID int, text string) {
+	edit := tgbotapi.NewEditMessageText(chatID, messageID, strings.ToValidUTF8(text, ""))
+	edit.ParseMode = tgbotapi.ModeHTML
+	if _, err := n.api.Send(edit); err != nil {
 		log.Printf("Error editing message: %v", err)
 	}
 }
 
-func (n *TelegramNotifier) EditMessageWithKeyboard(chatID int64, messageID int, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
-	validText := strings.ToValidUTF8(text, "")
-	editMsg := tgbotapi.NewEditMessageTextAndMarkup(chatID, messageID, validText, keyboard)
-	editMsg.ParseMode = tgbotapi.ModeHTML
-	_, err := n.Bot.Send(editMsg)
-	if err != nil {
-		log.Printf("Error editing message with keyboard: %v", err)
+func (n *telegramNotifier) EditMessageWithKeyboard(chatID int64, messageID int, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
+	edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, messageID, strings.ToValidUTF8(text, ""), keyboard)
+	edit.ParseMode = tgbotapi.ModeHTML
+	if _, err := n.api.Send(edit); err != nil {
+		log.Printf("Error editing message: %v", err)
 	}
 }
 
-func (n *TelegramNotifier) AnswerCallbackQuery(callbackID string, text string) {
-	answer := tgbotapi.NewCallback(callbackID, text)
-	if _, err := n.Bot.Request(answer); err != nil {
+func (n *telegramNotifier) AnswerCallbackQuery(callbackID string, text string) {
+	cb := tgbotapi.NewCallback(callbackID, text)
+	if _, err := n.api.Request(cb); err != nil {
 		log.Printf("Error answering callback: %v", err)
 	}
 }
 
-func (n *TelegramNotifier) DeleteMessage(chatID int64, messageID int) {
-	deleteMsg := tgbotapi.NewDeleteMessage(chatID, messageID)
-	if _, err := n.Bot.Request(deleteMsg); err != nil {
+func (n *telegramNotifier) DeleteMessage(chatID int64, messageID int) {
+	del := tgbotapi.NewDeleteMessage(chatID, messageID)
+	if _, err := n.api.Request(del); err != nil {
 		log.Printf("Error deleting message: %v", err)
 	}
 }

@@ -9,43 +9,35 @@ import (
 	"github.com/docker/docker/api/types"
 )
 
+var controlCharRegex = regexp.MustCompile(`[\x00-\x08\x0B-\x0C\x0E-\x1F]`)
+
 func HashString(s string) string {
 	h := fnv.New64a()
 	h.Write([]byte(s))
 	return strconv.FormatUint(h.Sum64(), 16)
 }
 
-func RemoveControlCharactersRegex(s string) string {
-	re := regexp.MustCompile(`[\x00-\x08\x0B-\x0C\x0E-\x1F]`)
-	return re.ReplaceAllString(s, "")
-}
-
-func Min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+func RemoveControlChars(s string) string {
+	return controlCharRegex.ReplaceAllString(s, "")
 }
 
 func EscapeHTML(text string) string {
-	replacer := strings.NewReplacer(
-		"<", "&lt;",
-		">", "&gt;",
-		"&", "&amp;",
-	)
-	return replacer.Replace(text)
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	return r.Replace(text)
 }
 
-func IsUserContainer(container types.Container) bool {
-    matched, _ := regexp.MatchString(`^[a-f0-9]{12}$`, container.Image)
-
-    if matched || strings.HasPrefix(container.Image, "sha256:") {
-		name := strings.Trim(container.Names[0], "/")
+func IsUserContainer(c types.Container) bool {
+	matched, _ := regexp.MatchString(`^[a-f0-9]{12}$`, c.Image)
+	if matched || strings.HasPrefix(c.Image, "sha256:") {
+		name := strings.Trim(c.Names[0], "/")
 		parts := strings.Split(name, "_")
 		if len(parts) == 2 {
 			return false
 		}
-    }
+	}
+	return true
+}
 
-    return true
+func ContainerName(c types.Container) string {
+	return strings.TrimPrefix(c.Names[0], "/")
 }

@@ -8,322 +8,506 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/HarkushaVlad/docker-monitor-bot/internal/docker"
-	"github.com/HarkushaVlad/docker-monitor-bot/internal/notification"
-	"github.com/HarkushaVlad/docker-monitor-bot/internal/utils"
 )
 
-const itemsPerPage = 6
+type viewType string
 
-type BotState struct {
+const (
+	viewMain      viewType = "main"
+	viewProject   viewType = "project"
+	viewContainer viewType = "container"
+)
+
+type State struct {
+	mu            sync.Mutex
 	LastMessageID int
-	CurrentPage   int
+	View          viewType
+	ProjectName   string
+	ContainerID   string
 	ShortIDMap    map[string]string
+	ProjectMap    map[int]string
 }
 
-var (
-	states   = make(map[int64]*BotState)
-	stateMux = &sync.Mutex{}
-)
-
-func getState(chatID int64) *BotState {
-	stateMux.Lock()
-	defer stateMux.Unlock()
-
-	if _, ok := states[chatID]; !ok {
-		states[chatID] = &BotState{
-			ShortIDMap: make(map[string]string),
-		}
-	}
-	return states[chatID]
-}
-
-func HandleCallbacks(bot *tgbotapi.BotAPI, notifier notification.Notifier) {
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-
-	updates := bot.GetUpdatesChan(u)
-	for update := range updates {
-		if update.CallbackQuery != nil {
-			HandleCallbackQuery(bot, update.CallbackQuery, notifier)
-		} else if update.Message != nil && update.Message.IsCommand() {
-			HandleCommand(bot, update.Message, notifier)
-		}
-	}
-}
-
-func HandleCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, notifier notification.Notifier) {
+func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 	chatID := msg.Chat.ID
-	state := getState(chatID)
+	state := b.getState(chatID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
 
 	switch msg.Command() {
+	case "start":
+		b.cmdStart(chatID, state)
 	case "check":
-		HandleCheckCommand(chatID, notifier, state)
+		b.cmdCheck(chatID, state)
 	case "list":
 		if state.LastMessageID != 0 {
-			notifier.DeleteMessage(chatID, state.LastMessageID)
+			b.notifier.DeleteMessage(chatID, state.LastMessageID)
 		}
 		state.LastMessageID = 0
-		state.CurrentPage = 0
-		showContainerList(chatID, state, notifier)
+		state.View = viewMain
+		b.showMainList(chatID, state)
 	}
 }
 
-func HandleCallbackQuery(bot *tgbotapi.BotAPI, query *tgbotapi.CallbackQuery, notifier notification.Notifier) {
+func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 	chatID := query.Message.Chat.ID
-	msgID := query.Message.MessageID
 	data := query.Data
-	state := getState(chatID)
+	state := b.getState(chatID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
 
-	notifier.AnswerCallbackQuery(query.ID, "")
+	b.notifier.AnswerCallbackQuery(query.ID, "")
 
 	switch {
-	case strings.HasPrefix(data, "container_"):
-		shortID := strings.TrimPrefix(data, "container_")
-		showContainerDetails(chatID, msgID, shortID, notifier, state)
-	case strings.HasPrefix(data, "page_"):
-		handlePageNavigation(chatID, data, notifier, state)
-	case strings.HasPrefix(data, "action_"):
-		handleContainerAction(chatID, msgID, data, notifier, state)
-	}
-}
+	case data == "back":
+		b.handleBack(chatID, state)
+	case data == "refresh":
+		b.refreshView(chatID, state)
 
-func HandleCheckCommand(chatID int64, notifier notification.Notifier, state *BotState) {
-	ctx := context.Background()
-	containers, err := docker.DockerClient.ContainerList(ctx, types.ContainerListOptions{All: true})
-	if err != nil {
-		editOrSendMessage(chatID, state.LastMessageID, fmt.Sprintf("Error retrieving container list: %v", err), notifier)
-		return
-	}
-
-	var userContainers []types.Container
-	for _, c := range containers {
-		if utils.IsUserContainer(c) {
-			userContainers = append(userContainers, c)
+	case strings.HasPrefix(data, "proj:"):
+		idx := 0
+		fmt.Sscanf(strings.TrimPrefix(data, "proj:"), "%d", &idx)
+		if name, ok := state.ProjectMap[idx]; ok {
+			state.ProjectName = name
+			state.View = viewProject
+			b.showProjectView(chatID, state)
 		}
-    }
 
-	if len(userContainers) == 0 {
-		editOrSendMessage(chatID, state.LastMessageID, "🔍 <b>No containers are running</b>", notifier)
-		return
+	case strings.HasPrefix(data, "cnt:"):
+		shortID := strings.TrimPrefix(data, "cnt:")
+		state.View = viewContainer
+		b.showContainerDetail(chatID, shortID, state)
+
+	case strings.HasPrefix(data, "act:"):
+		b.handleContainerAction(chatID, data, state)
+
+	case strings.HasPrefix(data, "pact:"):
+		b.handleProjectAction(chatID, data, state)
 	}
-
-	var statusLines []string
-	statusLines = append(statusLines, "📊 <b>Containers Status:</b>\n\n")
-
-	for _, container := range userContainers {
-		statusLines = append(statusLines, formatContainerInfo(container))
-	}
-
-	reply := strings.Join(statusLines, "")
-	editOrSendMessage(chatID, state.LastMessageID, reply, notifier)
 }
 
-func showContainerList(chatID int64, state *BotState, notifier notification.Notifier) {
+// --- Commands ---
+
+func (b *Bot) cmdStart(chatID int64, state *State) {
+	text := "👋 <b>Docker Monitor</b>\n\n" +
+		"<b>Commands:</b>\n" +
+		"/check — quick status overview\n" +
+		"/list — interactive container management"
+
+	if state.LastMessageID != 0 {
+		b.notifier.DeleteMessage(chatID, state.LastMessageID)
+	}
+	state.LastMessageID = b.notifier.SendText(chatID, text)
+}
+
+func (b *Bot) cmdCheck(chatID int64, state *State) {
 	ctx := context.Background()
-	containers, err := docker.DockerClient.ContainerList(ctx, types.ContainerListOptions{All: true})
+	groups, err := b.Docker.GetContainerGroups(ctx)
 	if err != nil {
-		editOrSendErrorMessage(chatID, state.LastMessageID, "Failed to fetch containers", notifier)
+		b.sendOrEdit(chatID, state, fmt.Sprintf("❌ Failed to fetch containers: %v", err))
 		return
 	}
 
-	var userContainers []types.Container
-    for _, c := range containers {
-        if utils.IsUserContainer(c) {
-            userContainers = append(userContainers, c)
-        }
-    }
+	if len(groups.Projects) == 0 && len(groups.Standalone) == 0 {
+		b.sendOrEdit(chatID, state, "🔍 <b>No containers found</b>")
+		return
+	}
 
-	totalPages := (len(userContainers)-1)/itemsPerPage + 1
-	start := state.CurrentPage * itemsPerPage
-	end := start + itemsPerPage
-	if end > len(userContainers) {
-		end = len(userContainers)
+	var sb strings.Builder
+	sb.WriteString("📊 <b>Docker Status</b>\n")
+
+	for _, proj := range groups.Projects {
+		running := proj.RunningCount()
+		total := len(proj.Services)
+		sb.WriteString(fmt.Sprintf("\n🗂 <b>%s</b> (%d/%d running)\n", proj.Name, running, total))
+		for _, svc := range proj.Services {
+			sb.WriteString(fmt.Sprintf("  %s %s — <code>%s</code>\n",
+				statusIcon(svc.State),
+				docker.ServiceName(svc),
+				svc.Image,
+			))
+		}
+	}
+
+	if len(groups.Standalone) > 0 {
+		sb.WriteString("\n📦 <b>Standalone</b>\n")
+		for _, c := range groups.Standalone {
+			sb.WriteString(fmt.Sprintf("  %s %s — <code>%s</code>\n",
+				statusIcon(c.State),
+				docker.ServiceName(c),
+				c.Image,
+			))
+		}
+	}
+
+	b.sendOrEdit(chatID, state, sb.String())
+}
+
+// --- Views ---
+
+func (b *Bot) showMainList(chatID int64, state *State) {
+	ctx := context.Background()
+	groups, err := b.Docker.GetContainerGroups(ctx)
+	if err != nil {
+		b.sendOrEditError(chatID, state, "Failed to fetch containers")
+		return
+	}
+
+	if len(groups.Projects) == 0 && len(groups.Standalone) == 0 {
+		b.sendOrEdit(chatID, state, "🔍 <b>No containers found</b>")
+		return
+	}
+
+	state.ProjectMap = make(map[int]string)
+	state.ShortIDMap = make(map[string]string)
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	if len(groups.Projects) > 0 {
+		var projButtons []tgbotapi.InlineKeyboardButton
+		for i, proj := range groups.Projects {
+			state.ProjectMap[i] = proj.Name
+			running := proj.RunningCount()
+			total := len(proj.Services)
+
+			icon := "🟢"
+			if running == 0 {
+				icon = "🔴"
+			} else if running < total {
+				icon = "🟡"
+			}
+
+			label := fmt.Sprintf("%s %s (%d/%d)", icon, proj.Name, running, total)
+			projButtons = append(projButtons, tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("proj:%d", i)))
+		}
+
+		for _, btn := range projButtons {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(btn))
+		}
+	}
+
+	if len(groups.Standalone) > 0 {
+		var cntButtons []tgbotapi.InlineKeyboardButton
+		for _, c := range groups.Standalone {
+			shortID := c.ID[:12]
+			state.ShortIDMap[shortID] = c.ID
+			label := fmt.Sprintf("%s %s", statusIcon(c.State), docker.ServiceName(c))
+			cntButtons = append(cntButtons, tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("cnt:%s", shortID)))
+		}
+		for i := 0; i < len(cntButtons); i += 2 {
+			if i+1 < len(cntButtons) {
+				rows = append(rows, tgbotapi.NewInlineKeyboardRow(cntButtons[i], cntButtons[i+1]))
+			} else {
+				rows = append(rows, tgbotapi.NewInlineKeyboardRow(cntButtons[i]))
+			}
+		}
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Refresh", "refresh"),
+	))
+
+	keyboard := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
+
+	totalProjects := len(groups.Projects)
+	totalStandalone := len(groups.Standalone)
+	msgText := fmt.Sprintf("📦 <b>Docker Services</b>\n\n🗂 Compose projects: %d\n📦 Standalone: %d",
+		totalProjects, totalStandalone)
+
+	if state.LastMessageID == 0 {
+		state.LastMessageID = b.notifier.SendTextWithKeyboard(chatID, msgText, keyboard)
+	} else {
+		b.notifier.EditMessageWithKeyboard(chatID, state.LastMessageID, msgText, keyboard)
+	}
+}
+
+func (b *Bot) showProjectView(chatID int64, state *State) {
+	ctx := context.Background()
+	groups, err := b.Docker.GetContainerGroups(ctx)
+	if err != nil {
+		b.sendOrEditError(chatID, state, "Failed to fetch containers")
+		return
+	}
+
+	var proj *docker.ComposeProject
+	for i := range groups.Projects {
+		if groups.Projects[i].Name == state.ProjectName {
+			proj = &groups.Projects[i]
+			break
+		}
+	}
+	if proj == nil {
+		b.sendOrEditError(chatID, state, "Project not found")
+		return
 	}
 
 	state.ShortIDMap = make(map[string]string)
-	var buttons []tgbotapi.InlineKeyboardButton
-	for _, container := range userContainers[start:end] {
-		shortID := container.ID[:12]
-		state.ShortIDMap[shortID] = container.ID
-
-		btn := tgbotapi.NewInlineKeyboardButtonData(
-			fmt.Sprintf("%s %s", getStatusIcon(container.State), getContainerName(container)),
-			fmt.Sprintf("container_%s", shortID),
-		)
-		buttons = append(buttons, btn)
-	}
 
 	var rows [][]tgbotapi.InlineKeyboardButton
-	for i := 0; i < len(buttons); i += 2 {
-		if i+1 < len(buttons) {
-			rows = append(rows, tgbotapi.NewInlineKeyboardRow(buttons[i], buttons[i+1]))
-		} else {
-			rows = append(rows, tgbotapi.NewInlineKeyboardRow(buttons[i]))
-		}
+
+	for _, svc := range proj.Services {
+		shortID := svc.ID[:12]
+		state.ShortIDMap[shortID] = svc.ID
+		label := fmt.Sprintf("%s %s", statusIcon(svc.State), docker.ServiceName(svc))
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("cnt:%s", shortID)),
+		))
 	}
 
-	var paginationRow []tgbotapi.InlineKeyboardButton
-	if state.CurrentPage > 0 {
-		paginationRow = append(paginationRow, tgbotapi.NewInlineKeyboardButtonData("⬅", "page_prev"))
-	}
-	if state.CurrentPage < totalPages-1 {
-		paginationRow = append(paginationRow, tgbotapi.NewInlineKeyboardButtonData("➡", "page_next"))
-	}
-	if len(paginationRow) > 0 {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(paginationRow...))
-	}
+	rows = append(rows,
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("▶️ Start All", "pact:start"),
+			tgbotapi.NewInlineKeyboardButtonData("⏹ Stop All", "pact:stop"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Restart All", "pact:restart"),
+			tgbotapi.NewInlineKeyboardButtonData("🔨 Rebuild", "pact:rebuild"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("↩️ Back", "back"),
+		),
+	)
 
 	keyboard := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
-	msgText := fmt.Sprintf("📦 Containers (%d-%d of %d):", start+1, end, len(userContainers))
+
+	running := proj.RunningCount()
+	total := len(proj.Services)
+	msgText := fmt.Sprintf("🗂 <b>%s</b>\n\nServices: %d | Running: %d/%d",
+		proj.Name, total, running, total)
 
 	if state.LastMessageID == 0 {
-		state.LastMessageID = notifier.SendTextWithKeyboard(chatID, msgText, keyboard)
+		state.LastMessageID = b.notifier.SendTextWithKeyboard(chatID, msgText, keyboard)
 	} else {
-		notifier.EditMessageWithKeyboard(chatID, state.LastMessageID, msgText, keyboard)
+		b.notifier.EditMessageWithKeyboard(chatID, state.LastMessageID, msgText, keyboard)
 	}
 }
 
-func showContainerDetails(chatID int64, messageID int, shortID string, notifier notification.Notifier, state *BotState) {
-	fullID, exists := state.ShortIDMap[shortID]
-	if !exists {
-		editOrSendErrorMessage(chatID, messageID, "Container not found", notifier)
+func (b *Bot) showContainerDetail(chatID int64, shortID string, state *State) {
+	fullID, ok := state.ShortIDMap[shortID]
+	if !ok {
+		b.sendOrEditError(chatID, state, "Container not found")
 		return
 	}
 
 	ctx := context.Background()
-	container, err := docker.DockerClient.ContainerInspect(ctx, fullID)
+	info, err := b.Docker.ContainerInspect(ctx, fullID)
 	if err != nil {
-		editOrSendErrorMessage(chatID, messageID, "Container not found", notifier)
+		b.sendOrEditError(chatID, state, "Container not found")
 		return
 	}
 
+	state.ContainerID = fullID
+
 	status := "🔴 Stopped"
-	if container.State.Running {
+	if info.State.Running {
 		status = "🟢 Running"
 	}
 
-	createdTime, err := time.Parse(time.RFC3339Nano, container.Created)
+	createdTime, err := time.Parse(time.RFC3339Nano, info.Created)
 	if err != nil {
 		log.Printf("Error parsing creation time: %v", err)
 		createdTime = time.Now()
 	}
 
-	text := fmt.Sprintf(
-		"<pre>"+
-			"┌ Name: %s\n"+
-			"├ Status: %s\n"+
-			"├ Image: %s\n"+
-			"└ Created: %s"+
-			"</pre>",
-		strings.TrimPrefix(container.Name, "/"),
-		status,
-		container.Config.Image,
-		createdTime.Format("2006-01-02 15:04:05"),
-	)
+	name := strings.TrimPrefix(info.Name, "/")
 
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("▶️ Start", fmt.Sprintf("action_start_%s", shortID)),
-			tgbotapi.NewInlineKeyboardButtonData("⏹️ Stop", fmt.Sprintf("action_stop_%s", shortID)),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔄 Restart", fmt.Sprintf("action_restart_%s", shortID)),
-			tgbotapi.NewInlineKeyboardButtonData("↩️ Back", "page_back"),
-		),
-	)
+	var sb strings.Builder
+	sb.WriteString("<pre>")
+	sb.WriteString(fmt.Sprintf("┌ Name:    %s\n", name))
+	sb.WriteString(fmt.Sprintf("├ Status:  %s\n", status))
+	sb.WriteString(fmt.Sprintf("├ Image:   %s\n", info.Config.Image))
 
-	notifier.EditMessageWithKeyboard(chatID, messageID, text, keyboard)
-	state.LastMessageID = messageID
-}
-
-func handlePageNavigation(chatID int64, action string, notifier notification.Notifier, state *BotState) {
-	switch strings.TrimPrefix(action, "page_") {
-	case "prev":
-		if state.CurrentPage > 0 {
-			state.CurrentPage--
-		}
-	case "next":
-		state.CurrentPage++
-	case "back":
-		state.CurrentPage = 0
+	if project := info.Config.Labels[docker.LabelComposeProject]; project != "" {
+		service := info.Config.Labels[docker.LabelComposeService]
+		sb.WriteString(fmt.Sprintf("├ Project: %s\n", project))
+		sb.WriteString(fmt.Sprintf("├ Service: %s\n", service))
 	}
 
-	showContainerList(chatID, state, notifier)
+	sb.WriteString(fmt.Sprintf("└ Created: %s", createdTime.Format("2006-01-02 15:04:05")))
+	sb.WriteString("</pre>")
+
+	rows := [][]tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("▶️ Start", fmt.Sprintf("act:start:%s", shortID)),
+			tgbotapi.NewInlineKeyboardButtonData("⏹ Stop", fmt.Sprintf("act:stop:%s", shortID)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Restart", fmt.Sprintf("act:restart:%s", shortID)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("↩️ Back", "back"),
+		),
+	}
+
+	keyboard := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
+
+	if state.LastMessageID == 0 {
+		state.LastMessageID = b.notifier.SendTextWithKeyboard(chatID, sb.String(), keyboard)
+	} else {
+		b.notifier.EditMessageWithKeyboard(chatID, state.LastMessageID, sb.String(), keyboard)
+	}
 }
 
-func handleContainerAction(chatID int64, messageID int, action string, notifier notification.Notifier, state *BotState) {
-	parts := strings.Split(action, "_")
+// --- Actions ---
+
+func (b *Bot) handleContainerAction(chatID int64, data string, state *State) {
+	parts := strings.SplitN(data, ":", 3)
 	if len(parts) < 3 {
 		return
 	}
-	actionType := parts[1]
+	action := parts[1]
 	shortID := parts[2]
 
-	fullID, exists := state.ShortIDMap[shortID]
-	if !exists {
-		editOrSendErrorMessage(chatID, messageID, "Container not found", notifier)
+	fullID, ok := state.ShortIDMap[shortID]
+	if !ok {
+		b.sendOrEditError(chatID, state, "Container not found")
 		return
 	}
 
 	ctx := context.Background()
 	var err error
 
-	switch actionType {
+	switch action {
 	case "start":
-		err = docker.DockerClient.ContainerStart(ctx, fullID, types.ContainerStartOptions{})
+		err = b.Docker.ContainerStart(ctx, fullID)
 	case "stop":
-		timeout := 10 * time.Second
-		err = docker.DockerClient.ContainerStop(ctx, fullID, &timeout)
+		err = b.Docker.ContainerStop(ctx, fullID)
 	case "restart":
-		timeout := 10 * time.Second
-		err = docker.DockerClient.ContainerRestart(ctx, fullID, &timeout)
-	}
-
-	if err != nil {
-		editOrSendErrorMessage(chatID, messageID, fmt.Sprintf("Failed to %s container: %v", actionType, err), notifier)
+		err = b.Docker.ContainerRestart(ctx, fullID)
+	default:
 		return
 	}
 
-	msgText := fmt.Sprintf("✅ Command <i>'%s'</i> for container <u><b>%s</b></u> executed successfully", actionType, shortID)
-	notifier.EditMessageText(chatID, messageID, msgText)
-	showContainerDetails(chatID, messageID, shortID, notifier, state)
+	if err != nil {
+		b.sendOrEditError(chatID, state, fmt.Sprintf("Failed to %s: %v", action, err))
+		return
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	b.showContainerDetail(chatID, shortID, state)
 }
 
-func formatContainerInfo(container types.Container) string {
-	createdTime := time.Unix(container.Created, 0)
-	return fmt.Sprintf(
-		"<pre>┌ ID: %s\n├ Name: %s\n├ Status: %s\n├ Image: %s\n└ Started: %s</pre>",
-		container.ID[:12],
-		getContainerName(container),
-		getStatusIcon(container.State),
-		container.Image,
-		createdTime.Format("2006-01-02 15:04:05"),
-	)
+func (b *Bot) handleProjectAction(chatID int64, data string, state *State) {
+	action := strings.TrimPrefix(data, "pact:")
+	projectName := state.ProjectName
+
+	if projectName == "" {
+		b.sendOrEditError(chatID, state, "No project selected")
+		return
+	}
+
+	ctx := context.Background()
+	var err error
+
+	if action == "rebuild" {
+		groups, gErr := b.Docker.GetContainerGroups(ctx)
+		if gErr != nil {
+			b.sendOrEditError(chatID, state, fmt.Sprintf("Failed to rebuild: %v", gErr))
+			return
+		}
+		for _, proj := range groups.Projects {
+			if proj.Name == projectName {
+				b.notifier.EditMessageText(chatID, state.LastMessageID,
+					fmt.Sprintf("🔨 <b>Rebuilding %s...</b>\n\nThis may take a while.", projectName))
+				err = b.Docker.RebuildProject(ctx, proj.WorkingDir, proj.ConfigFile)
+				break
+			}
+		}
+	} else {
+		b.notifier.EditMessageText(chatID, state.LastMessageID,
+			fmt.Sprintf("⏳ <b>%s %s...</b>", actionVerb(action), projectName))
+
+		switch action {
+		case "start":
+			err = b.Docker.StartProject(ctx, projectName)
+		case "stop":
+			err = b.Docker.StopProject(ctx, projectName)
+		case "restart":
+			err = b.Docker.RestartProject(ctx, projectName)
+		default:
+			return
+		}
+	}
+
+	if err != nil {
+		b.sendOrEditError(chatID, state, fmt.Sprintf("Failed to %s project: %v", action, err))
+		return
+	}
+
+	time.Sleep(time.Second)
+
+	b.showProjectView(chatID, state)
 }
 
-func getContainerName(container types.Container) string {
-	return strings.TrimPrefix(container.Names[0], "/")
+// --- Navigation ---
+
+func (b *Bot) handleBack(chatID int64, state *State) {
+	switch state.View {
+	case viewContainer:
+		if state.ProjectName != "" {
+			state.View = viewProject
+			b.showProjectView(chatID, state)
+		} else {
+			state.View = viewMain
+			b.showMainList(chatID, state)
+		}
+	case viewProject:
+		state.View = viewMain
+		state.ProjectName = ""
+		b.showMainList(chatID, state)
+	default:
+		state.View = viewMain
+		b.showMainList(chatID, state)
+	}
 }
 
-func getStatusIcon(state string) string {
+func (b *Bot) refreshView(chatID int64, state *State) {
+	switch state.View {
+	case viewProject:
+		b.showProjectView(chatID, state)
+	default:
+		b.showMainList(chatID, state)
+	}
+}
+
+// --- Helpers ---
+
+func (b *Bot) sendOrEdit(chatID int64, state *State, text string) {
+	if state.LastMessageID > 0 {
+		b.notifier.EditMessageText(chatID, state.LastMessageID, text)
+	} else {
+		state.LastMessageID = b.notifier.SendText(chatID, text)
+	}
+}
+
+func (b *Bot) sendOrEditError(chatID int64, state *State, text string) {
+	b.sendOrEdit(chatID, state, "❌ "+text)
+}
+
+func statusIcon(state string) string {
 	if state == "running" {
 		return "🟢"
 	}
 	return "🔴"
 }
 
-func editOrSendMessage(chatID int64, messageID int, text string, notifier notification.Notifier) {
-	if messageID > 0 {
-		notifier.EditMessageText(chatID, messageID, text)
-	} else {
-		notifier.SendText(chatID, text)
+func actionVerb(action string) string {
+	switch action {
+	case "start":
+		return "Starting"
+	case "stop":
+		return "Stopping"
+	case "restart":
+		return "Restarting"
+	default:
+		s := action + "ing"
+		if len(s) > 0 {
+			return strings.ToUpper(s[:1]) + s[1:]
+		}
+		return s
 	}
-}
-
-func editOrSendErrorMessage(chatID int64, messageID int, text string, notifier notification.Notifier) {
-	editOrSendMessage(chatID, messageID, "❌ "+text, notifier)
 }

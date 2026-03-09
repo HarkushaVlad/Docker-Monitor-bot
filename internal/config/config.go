@@ -15,50 +15,37 @@ type Config struct {
 	DockerHost       string
 	PollInterval     time.Duration
 	TailCount        int
-	Language         string
 }
 
-func LoadConfig() (*Config, error) {
-	if err := godotenv.Load(); err != nil {
-		return nil, fmt.Errorf("error loading .env file: %v", err)
-	}
+func Load() (*Config, error) {
+	_ = godotenv.Load()
 
-	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
-	if botToken == "" {
-		return nil, fmt.Errorf("TELEGRAM_BOT_TOKEN not set")
+	token := os.Getenv("TELEGRAM_BOT_TOKEN")
+	if token == "" {
+		return nil, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
 	}
 
 	chatIDStr := os.Getenv("TELEGRAM_CHAT_ID")
 	if chatIDStr == "" {
-		return nil, fmt.Errorf("TELEGRAM_CHAT_ID not set")
+		return nil, fmt.Errorf("TELEGRAM_CHAT_ID is required")
 	}
 	chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("invalid TELEGRAM_CHAT_ID format: %v", err)
+		return nil, fmt.Errorf("invalid TELEGRAM_CHAT_ID: %v", err)
 	}
 
-	pollIntervalStr := os.Getenv("POLL_INTERVAL_SECONDS")
-	var pollInterval time.Duration
-	if pollIntervalStr == "" {
-		pollInterval = 60 * time.Second
-	} else {
-		seconds, err := strconv.Atoi(pollIntervalStr)
-		if err != nil {
-			pollInterval = 60 * time.Second
-		} else {
-			pollInterval = time.Duration(seconds) * time.Second
+	pollInterval := 60 * time.Second
+	if s := os.Getenv("POLL_INTERVAL_SECONDS"); s != "" {
+		if sec, err := strconv.Atoi(s); err == nil && sec > 0 {
+			pollInterval = time.Duration(sec) * time.Second
 		}
 	}
 
-	tailCountStr := os.Getenv("TAIL_COUNT")
-	tailCount, err := strconv.Atoi(tailCountStr)
-	if err != nil || tailCount <= 0 {
-		tailCount = 100
-	}
-
-	lang := os.Getenv("LANGUAGE")
-	if lang == "" {
-		lang = "en"
+	tailCount := 100
+	if s := os.Getenv("TAIL_COUNT"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			tailCount = n
+		}
 	}
 
 	dockerHost := os.Getenv("DOCKER_HOST")
@@ -67,11 +54,10 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return &Config{
-		TelegramBotToken: botToken,
+		TelegramBotToken: token,
 		TelegramChatID:   chatID,
 		DockerHost:       dockerHost,
 		PollInterval:     pollInterval,
 		TailCount:        tailCount,
-		Language:         lang,
 	}, nil
 }

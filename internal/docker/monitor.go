@@ -9,60 +9,71 @@ import (
 	"strings"
 	"time"
 
-	"github.com/HarkushaVlad/docker-monitor-bot/internal/notification"
-	"github.com/HarkushaVlad/docker-monitor-bot/internal/utils"
-
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
+
+	"github.com/HarkushaVlad/docker-monitor-bot/internal/notification"
+	"github.com/HarkushaVlad/docker-monitor-bot/internal/utils"
 )
 
-func MonitorDockerEvents(ctx context.Context, telegramChatID int64, notifier notification.Notifier) {
-	options := types.EventsOptions{}
-	eventCh, errCh := DockerClient.Events(ctx, options)
+func (s *Service) MonitorEvents(ctx context.Context, chatID int64, notifier notification.Notifier) {
+	eventCh, errCh := s.client.Events(ctx, types.EventsOptions{})
 
 	for {
 		select {
 		case event := <-eventCh:
-			if event.Type == events.ContainerEventType {
-				if event.Status == "start" {
-					message := fmt.Sprintf(
-						"🚀 <b>Container started</b>\n\n"+
-							"<pre>"+
-							"┌ ID: %s\n"+
-							"└ Name: %s"+
-							"</pre>",
-						event.ID[:12],
-						event.Actor.Attributes["name"],
-					)
-					log.Printf("Container started: ID=%s, Name=%s", event.ID[:12], event.Actor.Attributes["name"])
-					notifier.SendText(telegramChatID, message)
-				}
-				if event.Status == "die" || event.Status == "oom" {
-					message := fmt.Sprintf(
-						"❗️ <b>Container stopped</b>\n\n"+
-							"<pre>"+
-							"┌ ID: %s\n"+
-							"├ Name: %s\n"+
-							"└ Status: %s"+
-							"</pre>",
-						event.ID[:12],
-						event.Actor.Attributes["name"],
-						event.Status,
-					)
-					log.Printf("Container stopped: ID=%s, Name=%s, Status=%s", event.ID[:12], event.Actor.Attributes["name"], event.Status)
-					notifier.SendText(telegramChatID, message)
-				}
+			if event.Type != events.ContainerEventType {
+				continue
 			}
+			s.handleContainerEvent(event, chatID, notifier)
 		case err := <-errCh:
 			if err != nil {
-				log.Printf("Error receiving Docker events: %v", err)
+				log.Printf("Docker events error: %v", err)
 				time.Sleep(10 * time.Second)
 			}
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
-func MonitorContainerLogs(ctx context.Context, pollInterval time.Duration, tailCount int, telegramChatID int64, notifier notification.Notifier) {
+func (s *Service) handleContainerEvent(event events.Message, chatID int64, notifier notification.Notifier) {
+	shortID := event.ID[:12]
+	name := event.Actor.Attributes["name"]
+
+	project := event.Actor.Attributes[LabelComposeProject]
+	service := event.Actor.Attributes[LabelComposeService]
+
+	origin := name
+	if project != "" && service != "" {
+		origin = fmt.Sprintf("%s / %s", project, service)
+	}
+
+	switch event.Status {
+	case "start":
+		msg := fmt.Sprintf(
+			"🚀 <b>Container started</b>\n\n"+
+				"<pre>┌ Name: %s\n"+
+				"└ ID:   %s</pre>",
+			origin, shortID,
+		)
+		log.Printf("Container started: %s (%s)", origin, shortID)
+		notifier.SendText(chatID, msg)
+
+	case "die", "oom":
+		msg := fmt.Sprintf(
+			"❗ <b>Container stopped</b>\n\n"+
+				"<pre>┌ Name:   %s\n"+
+				"├ ID:     %s\n"+
+				"└ Reason: %s</pre>",
+			origin, shortID, event.Status,
+		)
+		log.Printf("Container stopped: %s (%s) reason=%s", origin, shortID, event.Status)
+		notifier.SendText(chatID, msg)
+	}
+}
+
+func (s *Service) MonitorLogs(ctx context.Context, pollInterval time.Duration, tailCount int, chatID int64, notifier notification.Notifier) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -72,93 +83,103 @@ func MonitorContainerLogs(ctx context.Context, pollInterval time.Duration, tailC
 	for {
 		select {
 		case <-ticker.C:
-			containers, err := DockerClient.ContainerList(ctx, types.ContainerListOptions{All: true})
-			if err != nil {
-				log.Printf("Error fetching container list: %v", err)
-				continue
-			}
-
-			for _, container := range containers {
-				if container.State != "running" {
-					continue
-				}
-
-				go func(c types.Container) {
-					options := types.ContainerLogsOptions{
-						ShowStdout: true,
-						ShowStderr: true,
-						Tail:       fmt.Sprintf("%d", tailCount),
-					}
-
-					out, err := DockerClient.ContainerLogs(ctx, c.ID, options)
-					if err != nil {
-						log.Printf("Error fetching logs for container %s: %v", strings.TrimPrefix(c.Names[0], "/"), err)
-						return
-					}
-					defer out.Close()
-
-					scanner := bufio.NewScanner(out)
-					var lines []string
-					var lineHashes []string
-					for scanner.Scan() {
-						line := scanner.Text()
-						lines = append(lines, line)
-						lineHashes = append(lineHashes, utils.HashString(line))
-					}
-					if err := scanner.Err(); err != nil {
-						log.Printf("Error scanning logs for container %s: %v", strings.TrimPrefix(c.Names[0], "/"), err)
-						return
-					}
-
-					storedMarker, exists := lastMarkers[c.ID]
-					startIndex := 0
-					if exists && storedMarker != "" {
-						found := false
-						for i, h := range lineHashes {
-							if h == storedMarker {
-								startIndex = i + 1
-								found = true
-								break
-							}
-						}
-						if !found {
-							startIndex = 0
-						}
-					}
-
-					if startIndex < len(lines) {
-						newLines := lines[startIndex:]
-						var errors []string
-						for _, line := range newLines {
-							if errorRegex.MatchString(line) {
-								errors = append(errors, line)
-							}
-						}
-						if len(errors) > 0 {
-							var errorMessages []string
-							for _, errLine := range errors[:utils.Min(3, len(errors))] {
-								filteredString := utils.RemoveControlCharactersRegex(strings.ToValidUTF8(errLine, ""))
-								escapedString := utils.EscapeHTML(filteredString)
-								errorMessages = append(errorMessages, fmt.Sprintf("<pre>%s</pre>", escapedString))
-							}
-
-							message := fmt.Sprintf(
-								"🚨 <b>Container <u>%s</u> encountered errors:</b>\n\n%s",
-								strings.TrimPrefix(c.Names[0], "/"),
-								strings.Join(errorMessages, "\n"),
-							)
-							log.Printf("Errors detected in container %s:\n%s",
-								strings.TrimPrefix(c.Names[0], "/"),
-								strings.Join(errors, "\n"),
-							)
-							notifier.SendText(telegramChatID, message)
-						}
-						lastMarkers[c.ID] = lineHashes[len(lineHashes)-1]
-					}
-				}(container)
-			}
+			s.checkContainerLogs(ctx, tailCount, chatID, notifier, errorRegex, lastMarkers)
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+func (s *Service) checkContainerLogs(ctx context.Context, tailCount int, chatID int64, notifier notification.Notifier, errorRegex *regexp.Regexp, lastMarkers map[string]string) {
+	containers, err := s.client.ContainerList(ctx, types.ContainerListOptions{All: true})
+	if err != nil {
+		log.Printf("Error fetching containers: %v", err)
+		return
+	}
+
+	for _, c := range containers {
+		if c.State != "running" {
+			continue
+		}
+		go s.scanContainerLogs(ctx, c, tailCount, chatID, notifier, errorRegex, lastMarkers)
+	}
+}
+
+func (s *Service) scanContainerLogs(ctx context.Context, c types.Container, tailCount int, chatID int64, notifier notification.Notifier, errorRegex *regexp.Regexp, lastMarkers map[string]string) {
+	name := utils.ContainerName(c)
+
+	out, err := s.client.ContainerLogs(ctx, c.ID, types.ContainerLogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Tail:       fmt.Sprintf("%d", tailCount),
+	})
+	if err != nil {
+		log.Printf("Error fetching logs for %s: %v", name, err)
+		return
+	}
+	defer out.Close()
+
+	scanner := bufio.NewScanner(out)
+	var lines []string
+	var hashes []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		lines = append(lines, line)
+		hashes = append(hashes, utils.HashString(line))
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("Error scanning logs for %s: %v", name, err)
+		return
+	}
+	if len(lines) == 0 {
+		return
+	}
+
+	startIdx := 0
+	if marker, ok := lastMarkers[c.ID]; ok && marker != "" {
+		for i, h := range hashes {
+			if h == marker {
+				startIdx = i + 1
+				break
+			}
+		}
+	}
+
+	if startIdx >= len(lines) {
+		lastMarkers[c.ID] = hashes[len(hashes)-1]
+		return
+	}
+
+	var errors []string
+	for _, line := range lines[startIdx:] {
+		if errorRegex.MatchString(line) {
+			errors = append(errors, line)
+		}
+	}
+
+	if len(errors) > 0 {
+		maxErrors := min(3, len(errors))
+		var formatted []string
+		for _, errLine := range errors[:maxErrors] {
+			clean := utils.RemoveControlChars(strings.ToValidUTF8(errLine, ""))
+			formatted = append(formatted, fmt.Sprintf("<pre>%s</pre>", utils.EscapeHTML(clean)))
+		}
+
+		project := c.Labels[LabelComposeProject]
+		service := c.Labels[LabelComposeService]
+		displayName := name
+		if project != "" && service != "" {
+			displayName = fmt.Sprintf("%s / %s", project, service)
+		}
+
+		msg := fmt.Sprintf(
+			"🚨 <b>Errors in <u>%s</u>:</b>\n\n%s",
+			displayName,
+			strings.Join(formatted, "\n"),
+		)
+		log.Printf("Errors in %s:\n%s", name, strings.Join(errors, "\n"))
+		notifier.SendText(chatID, msg)
+	}
+
+	lastMarkers[c.ID] = hashes[len(hashes)-1]
 }

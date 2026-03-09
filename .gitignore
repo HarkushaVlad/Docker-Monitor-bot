@@ -1,7 +1,6 @@
 .idea/
 
 vendor/
-go.sum
 
 .env
 .history

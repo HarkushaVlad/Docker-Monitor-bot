@@ -20,7 +20,7 @@ func main() {
 		log.Fatalf("Failed to init Docker client: %v", err)
 	}
 
-	b, err := bot.New(cfg.TelegramBotToken, dockerSvc, cfg.TelegramChatID)
+	b, err := bot.New(cfg.TelegramBotToken, dockerSvc, cfg.TelegramChatIDs)
 	if err != nil {
 		log.Fatalf("Failed to init Telegram bot: %v", err)
 	}
@@ -29,8 +29,8 @@ func main() {
 	defer cancel()
 
 	notifier := b.Notifier()
-	go dockerSvc.MonitorEvents(ctx, cfg.TelegramChatID, notifier)
-	go dockerSvc.MonitorLogs(ctx, cfg.PollInterval, cfg.TailCount, cfg.TelegramChatID, notifier)
+	go dockerSvc.MonitorEvents(ctx, cfg.TelegramChatIDs, notifier)
+	go dockerSvc.MonitorLogs(ctx, cfg.PollInterval, cfg.TailCount, cfg.TelegramChatIDs, notifier)
 
 	log.Println("Docker monitoring bot started")
 	b.Run()

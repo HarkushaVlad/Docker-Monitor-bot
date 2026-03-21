@@ -16,7 +16,7 @@ import (
 	"github.com/HarkushaVlad/docker-monitor-bot/internal/utils"
 )
 
-func (s *Service) MonitorEvents(ctx context.Context, chatID int64, notifier notification.Notifier) {
+func (s *Service) MonitorEvents(ctx context.Context, chatIDs []int64, notifier notification.Notifier) {
 	eventCh, errCh := s.client.Events(ctx, types.EventsOptions{})
 
 	for {
@@ -25,7 +25,7 @@ func (s *Service) MonitorEvents(ctx context.Context, chatID int64, notifier noti
 			if event.Type != events.ContainerEventType {
 				continue
 			}
-			s.handleContainerEvent(event, chatID, notifier)
+			s.handleContainerEvent(event, chatIDs, notifier)
 		case err := <-errCh:
 			if err != nil {
 				log.Printf("Docker events error: %v", err)
@@ -37,7 +37,7 @@ func (s *Service) MonitorEvents(ctx context.Context, chatID int64, notifier noti
 	}
 }
 
-func (s *Service) handleContainerEvent(event events.Message, chatID int64, notifier notification.Notifier) {
+func (s *Service) handleContainerEvent(event events.Message, chatIDs []int64, notifier notification.Notifier) {
 	shortID := event.ID[:12]
 	name := event.Actor.Attributes["name"]
 
@@ -58,7 +58,9 @@ func (s *Service) handleContainerEvent(event events.Message, chatID int64, notif
 			origin, shortID,
 		)
 		log.Printf("Container started: %s (%s)", origin, shortID)
-		notifier.SendText(chatID, msg)
+		for _, chatID := range chatIDs {
+			notifier.SendText(chatID, msg)
+		}
 
 	case "die", "oom":
 		msg := fmt.Sprintf(
@@ -69,11 +71,13 @@ func (s *Service) handleContainerEvent(event events.Message, chatID int64, notif
 			origin, shortID, event.Status,
 		)
 		log.Printf("Container stopped: %s (%s) reason=%s", origin, shortID, event.Status)
-		notifier.SendText(chatID, msg)
+		for _, chatID := range chatIDs {
+			notifier.SendText(chatID, msg)
+		}
 	}
 }
 
-func (s *Service) MonitorLogs(ctx context.Context, pollInterval time.Duration, tailCount int, chatID int64, notifier notification.Notifier) {
+func (s *Service) MonitorLogs(ctx context.Context, pollInterval time.Duration, tailCount int, chatIDs []int64, notifier notification.Notifier) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -83,14 +87,14 @@ func (s *Service) MonitorLogs(ctx context.Context, pollInterval time.Duration, t
 	for {
 		select {
 		case <-ticker.C:
-			s.checkContainerLogs(ctx, tailCount, chatID, notifier, errorRegex, lastMarkers)
+			s.checkContainerLogs(ctx, tailCount, chatIDs, notifier, errorRegex, lastMarkers)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-func (s *Service) checkContainerLogs(ctx context.Context, tailCount int, chatID int64, notifier notification.Notifier, errorRegex *regexp.Regexp, lastMarkers map[string]string) {
+func (s *Service) checkContainerLogs(ctx context.Context, tailCount int, chatIDs []int64, notifier notification.Notifier, errorRegex *regexp.Regexp, lastMarkers map[string]string) {
 	containers, err := s.client.ContainerList(ctx, types.ContainerListOptions{All: true})
 	if err != nil {
 		log.Printf("Error fetching containers: %v", err)
@@ -101,11 +105,11 @@ func (s *Service) checkContainerLogs(ctx context.Context, tailCount int, chatID 
 		if c.State != "running" {
 			continue
 		}
-		go s.scanContainerLogs(ctx, c, tailCount, chatID, notifier, errorRegex, lastMarkers)
+		go s.scanContainerLogs(ctx, c, tailCount, chatIDs, notifier, errorRegex, lastMarkers)
 	}
 }
 
-func (s *Service) scanContainerLogs(ctx context.Context, c types.Container, tailCount int, chatID int64, notifier notification.Notifier, errorRegex *regexp.Regexp, lastMarkers map[string]string) {
+func (s *Service) scanContainerLogs(ctx context.Context, c types.Container, tailCount int, chatIDs []int64, notifier notification.Notifier, errorRegex *regexp.Regexp, lastMarkers map[string]string) {
 	name := utils.ContainerName(c)
 
 	out, err := s.client.ContainerLogs(ctx, c.ID, types.ContainerLogsOptions{
@@ -178,7 +182,9 @@ func (s *Service) scanContainerLogs(ctx context.Context, c types.Container, tail
 			strings.Join(formatted, "\n"),
 		)
 		log.Printf("Errors in %s:\n%s", name, strings.Join(errors, "\n"))
-		notifier.SendText(chatID, msg)
+		for _, chatID := range chatIDs {
+			notifier.SendText(chatID, msg)
+		}
 	}
 
 	lastMarkers[c.ID] = hashes[len(hashes)-1]

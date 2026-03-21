@@ -66,7 +66,7 @@ cp .env.example .env
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | — | Bot token from [@BotFather](https://t.me/BotFather) |
-| `TELEGRAM_CHAT_ID` | Yes | — | Chat ID where notifications are sent. The bot only responds to commands from this chat |
+| `TELEGRAM_CHAT_ID` | Yes | — | Chat ID(s) where notifications are sent. Multiple IDs can be separated by commas (e.g., `123,456`). The bot only responds to commands from these chats. |
 | `DOCKER_HOST` | No | `unix:///var/run/docker.sock` | Docker daemon socket. On Windows: `tcp://127.0.0.1:2376` |
 | `POLL_INTERVAL_SECONDS` | No | `60` | How often to scan container logs for errors (seconds) |
 | `TAIL_COUNT` | No | `100` | Number of recent log lines to fetch per container |

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -11,7 +12,7 @@ import (
 
 type Config struct {
 	TelegramBotToken string
-	TelegramChatID   int64
+	TelegramChatIDs  []int64
 	DockerHost       string
 	PollInterval     time.Duration
 	TailCount        int
@@ -29,9 +30,22 @@ func Load() (*Config, error) {
 	if chatIDStr == "" {
 		return nil, fmt.Errorf("TELEGRAM_CHAT_ID is required")
 	}
-	chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid TELEGRAM_CHAT_ID: %v", err)
+
+	var chatIDs []int64
+	for _, idStr := range strings.Split(chatIDStr, ",") {
+		idStr = strings.TrimSpace(idStr)
+		if idStr == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid TELEGRAM_CHAT_ID '%s': %v", idStr, err)
+		}
+		chatIDs = append(chatIDs, id)
+	}
+
+	if len(chatIDs) == 0 {
+		return nil, fmt.Errorf("at least one TELEGRAM_CHAT_ID is required")
 	}
 
 	pollInterval := 60 * time.Second
@@ -55,7 +69,7 @@ func Load() (*Config, error) {
 
 	return &Config{
 		TelegramBotToken: token,
-		TelegramChatID:   chatID,
+		TelegramChatIDs:  chatIDs,
 		DockerHost:       dockerHost,
 		PollInterval:     pollInterval,
 		TailCount:        tailCount,

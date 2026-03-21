@@ -15,13 +15,13 @@ import (
 type Bot struct {
 	api      *tgbotapi.BotAPI
 	Docker   *docker.Service
-	ChatID   int64
+	ChatIDs  []int64
 	notifier notification.Notifier
 	states   map[int64]*State
 	mu       sync.Mutex
 }
 
-func New(token string, dockerSvc *docker.Service, chatID int64) (*Bot, error) {
+func New(token string, dockerSvc *docker.Service, chatIDs []int64) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init telegram bot: %v", err)
@@ -32,7 +32,7 @@ func New(token string, dockerSvc *docker.Service, chatID int64) (*Bot, error) {
 	b := &Bot{
 		api:    api,
 		Docker: dockerSvc,
-		ChatID: chatID,
+		ChatIDs: chatIDs,
 		states: make(map[int64]*State),
 	}
 	b.notifier = &telegramNotifier{api: api}
@@ -51,13 +51,24 @@ func (b *Bot) Run() {
 	for update := range updates {
 		switch {
 		case update.CallbackQuery != nil:
-			b.handleCallback(update.CallbackQuery)
+			if b.IsAllowed(update.CallbackQuery.Message.Chat.ID) {
+				b.handleCallback(update.CallbackQuery)
+			}
 		case update.Message != nil && update.Message.IsCommand():
-			if update.Message.Chat.ID == b.ChatID {
+			if b.IsAllowed(update.Message.Chat.ID) {
 				b.handleCommand(update.Message)
 			}
 		}
 	}
+}
+
+func (b *Bot) IsAllowed(chatID int64) bool {
+	for _, id := range b.ChatIDs {
+		if id == chatID {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *Bot) getState(chatID int64) *State {

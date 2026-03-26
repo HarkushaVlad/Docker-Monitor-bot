@@ -1,9 +1,7 @@
 package utils
 
 import (
-	"hash/fnv"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/docker/docker/api/types"
@@ -11,14 +9,16 @@ import (
 
 var controlCharRegex = regexp.MustCompile(`[\x00-\x08\x0B-\x0C\x0E-\x1F]`)
 
-func HashString(s string) string {
-	h := fnv.New64a()
-	h.Write([]byte(s))
-	return strconv.FormatUint(h.Sum64(), 16)
-}
-
 func RemoveControlChars(s string) string {
 	return controlCharRegex.ReplaceAllString(s, "")
+}
+
+func StripDockerLogHeader(line []byte) []byte {
+	if len(line) >= 8 && (line[0] == 0 || line[0] == 1 || line[0] == 2) &&
+		line[1] == 0 && line[2] == 0 && line[3] == 0 {
+		return line[8:]
+	}
+	return line
 }
 
 func EscapeHTML(text string) string {

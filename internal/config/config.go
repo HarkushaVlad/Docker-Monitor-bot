@@ -15,7 +15,6 @@ type Config struct {
 	TelegramChatIDs  []int64
 	DockerHost       string
 	PollInterval     time.Duration
-	TailCount        int
 }
 
 func Load() (*Config, error) {
@@ -55,13 +54,6 @@ func Load() (*Config, error) {
 		}
 	}
 
-	tailCount := 100
-	if s := os.Getenv("TAIL_COUNT"); s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 {
-			tailCount = n
-		}
-	}
-
 	dockerHost := os.Getenv("DOCKER_HOST")
 	if dockerHost == "" {
 		dockerHost = "unix:///var/run/docker.sock"
@@ -72,6 +64,5 @@ func Load() (*Config, error) {
 		TelegramChatIDs:  chatIDs,
 		DockerHost:       dockerHost,
 		PollInterval:     pollInterval,
-		TailCount:        tailCount,
 	}, nil
 }

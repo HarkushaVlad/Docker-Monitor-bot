@@ -30,7 +30,7 @@ func main() {
 
 	notifier := b.Notifier()
 	go dockerSvc.MonitorEvents(ctx, cfg.TelegramChatIDs, notifier)
-	go dockerSvc.MonitorLogs(ctx, cfg.PollInterval, cfg.TailCount, cfg.TelegramChatIDs, notifier)
+	go dockerSvc.MonitorLogs(ctx, cfg.PollInterval, cfg.TelegramChatIDs, notifier)
 
 	log.Println("Docker monitoring bot started")
 	b.Run()

@@ -391,6 +391,19 @@ func (b *Bot) handleContainerAction(chatID int64, data string, state *State) {
 	b.showContainerDetail(chatID, shortID, state)
 }
 
+func (b *Bot) findProject(ctx context.Context, name string) (*docker.ComposeProject, error) {
+	groups, err := b.Docker.GetContainerGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range groups.Projects {
+		if groups.Projects[i].Name == name {
+			return &groups.Projects[i], nil
+		}
+	}
+	return nil, fmt.Errorf("project %q not found", name)
+}
+
 func (b *Bot) handleProjectAction(chatID int64, data string, state *State) {
 	action := strings.TrimPrefix(data, "pact:")
 	projectName := state.ProjectName
@@ -401,36 +414,28 @@ func (b *Bot) handleProjectAction(chatID int64, data string, state *State) {
 	}
 
 	ctx := context.Background()
-	var err error
 
-	if action == "rebuild" {
-		groups, gErr := b.Docker.GetContainerGroups(ctx)
-		if gErr != nil {
-			b.sendOrEditError(chatID, state, fmt.Sprintf("Failed to rebuild: %v", gErr))
-			return
-		}
-		for _, proj := range groups.Projects {
-			if proj.Name == projectName {
-				b.notifier.EditMessageText(chatID, state.LastMessageID,
-					fmt.Sprintf("🔨 <b>Rebuilding %s...</b>\n\nThis may take a while.", projectName))
-				err = b.Docker.RebuildProject(ctx, proj.WorkingDir, proj.ConfigFile)
-				break
-			}
-		}
-	} else {
-		b.notifier.EditMessageText(chatID, state.LastMessageID,
-			fmt.Sprintf("⏳ <b>%s %s...</b>", actionVerb(action), projectName))
+	proj, err := b.findProject(ctx, projectName)
+	if err != nil {
+		b.sendOrEditError(chatID, state, fmt.Sprintf("Failed to find project: %v", err))
+		return
+	}
 
-		switch action {
-		case "start":
-			err = b.Docker.StartProject(ctx, projectName)
-		case "stop":
-			err = b.Docker.StopProject(ctx, projectName)
-		case "restart":
-			err = b.Docker.RestartProject(ctx, projectName)
-		default:
-			return
-		}
+	verb := actionVerb(action)
+	b.notifier.EditMessageText(chatID, state.LastMessageID,
+		fmt.Sprintf("⏳ <b>%s %s...</b>", verb, projectName))
+
+	switch action {
+	case "start":
+		err = b.Docker.StartProject(ctx, proj.WorkingDir, proj.ConfigFile)
+	case "stop":
+		err = b.Docker.StopProject(ctx, proj.WorkingDir, proj.ConfigFile)
+	case "restart":
+		err = b.Docker.RestartProject(ctx, proj.WorkingDir, proj.ConfigFile)
+	case "rebuild":
+		err = b.Docker.RebuildProject(ctx, proj.WorkingDir, proj.ConfigFile)
+	default:
+		return
 	}
 
 	if err != nil {

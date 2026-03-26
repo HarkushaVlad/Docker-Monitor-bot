@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 
 	"github.com/HarkushaVlad/docker-monitor-bot/internal/utils"
@@ -140,63 +139,14 @@ func (s *Service) ContainerRestart(ctx context.Context, id string) error {
 	return s.client.ContainerRestart(ctx, id, &timeout)
 }
 
-func (s *Service) projectContainers(ctx context.Context, projectName string) ([]types.Container, error) {
-	f := filters.NewArgs()
-	f.Add("label", fmt.Sprintf("%s=%s", LabelComposeProject, projectName))
-	return s.client.ContainerList(ctx, types.ContainerListOptions{All: true, Filters: f})
-}
-
-func (s *Service) StartProject(ctx context.Context, projectName string) error {
-	containers, err := s.projectContainers(ctx, projectName)
-	if err != nil {
-		return err
-	}
-	for _, c := range containers {
-		if c.State != "running" {
-			if err := s.ContainerStart(ctx, c.ID); err != nil {
-				return fmt.Errorf("failed to start %s: %v", ServiceName(c), err)
-			}
-		}
-	}
-	return nil
-}
-
-func (s *Service) StopProject(ctx context.Context, projectName string) error {
-	containers, err := s.projectContainers(ctx, projectName)
-	if err != nil {
-		return err
-	}
-	for _, c := range containers {
-		if c.State == "running" {
-			if err := s.ContainerStop(ctx, c.ID); err != nil {
-				return fmt.Errorf("failed to stop %s: %v", ServiceName(c), err)
-			}
-		}
-	}
-	return nil
-}
-
-func (s *Service) RestartProject(ctx context.Context, projectName string) error {
-	containers, err := s.projectContainers(ctx, projectName)
-	if err != nil {
-		return err
-	}
-	for _, c := range containers {
-		if err := s.ContainerRestart(ctx, c.ID); err != nil {
-			return fmt.Errorf("failed to restart %s: %v", ServiceName(c), err)
-		}
-	}
-	return nil
-}
-
-func (s *Service) RebuildProject(ctx context.Context, workingDir, configFile string) error {
-	args := []string{"compose"}
+func (s *Service) composeExec(ctx context.Context, workingDir, configFile string, args ...string) error {
+	cmdArgs := []string{"compose"}
 	if configFile != "" {
-		args = append(args, "-f", configFile)
+		cmdArgs = append(cmdArgs, "-f", configFile)
 	}
-	args = append(args, "up", "-d", "--build")
+	cmdArgs = append(cmdArgs, args...)
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := exec.CommandContext(ctx, "docker", cmdArgs...)
 	if workingDir != "" {
 		cmd.Dir = workingDir
 	}
@@ -205,6 +155,22 @@ func (s *Service) RebuildProject(ctx context.Context, workingDir, configFile str
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func (s *Service) StartProject(ctx context.Context, workingDir, configFile string) error {
+	return s.composeExec(ctx, workingDir, configFile, "start")
+}
+
+func (s *Service) StopProject(ctx context.Context, workingDir, configFile string) error {
+	return s.composeExec(ctx, workingDir, configFile, "stop")
+}
+
+func (s *Service) RestartProject(ctx context.Context, workingDir, configFile string) error {
+	return s.composeExec(ctx, workingDir, configFile, "restart")
+}
+
+func (s *Service) RebuildProject(ctx context.Context, workingDir, configFile string) error {
+	return s.composeExec(ctx, workingDir, configFile, "up", "-d", "--build")
 }
 
 func ServiceName(c types.Container) string {

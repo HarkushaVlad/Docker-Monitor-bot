@@ -15,7 +15,7 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	dockerSvc, err := docker.NewService()
+	dockerSvc, err := docker.NewService(cfg.LogIgnoreRulesFile)
 	if err != nil {
 		log.Fatalf("Failed to init Docker client: %v", err)
 	}

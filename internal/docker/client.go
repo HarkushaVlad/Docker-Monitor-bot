@@ -22,19 +22,47 @@ const (
 )
 
 type Service struct {
-	client *client.Client
+	client      *client.Client
+	ignoreStore *logIgnoreStore
 }
 
-func NewService() (*Service, error) {
+func NewService(ignoreRulesFile string) (*Service, error) {
 	c, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create docker client: %v", err)
 	}
-	return &Service{client: c}, nil
+
+	ignoreStore, err := newLogIgnoreStore(ignoreRulesFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init log ignore store: %v", err)
+	}
+
+	return &Service{client: c, ignoreStore: ignoreStore}, nil
 }
 
 func (s *Service) Client() *client.Client {
 	return s.client
+}
+
+func (s *Service) ListLogIgnoreRules() []LogIgnoreRule {
+	if s.ignoreStore == nil {
+		return nil
+	}
+	return s.ignoreStore.List()
+}
+
+func (s *Service) AddLogIgnoreRule(scopeSpec, match string) (LogIgnoreRule, error) {
+	if s.ignoreStore == nil {
+		return LogIgnoreRule{}, fmt.Errorf("log ignore store is not initialized")
+	}
+	return s.ignoreStore.Add(scopeSpec, match)
+}
+
+func (s *Service) DeleteLogIgnoreRule(id int) (bool, error) {
+	if s.ignoreStore == nil {
+		return false, fmt.Errorf("log ignore store is not initialized")
+	}
+	return s.ignoreStore.Delete(id)
 }
 
 type ComposeProject struct {

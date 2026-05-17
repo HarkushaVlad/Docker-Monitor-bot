@@ -30,10 +30,10 @@ func New(token string, dockerSvc *docker.Service, chatIDs []int64) (*Bot, error)
 	log.Printf("Telegram bot: @%s", api.Self.UserName)
 
 	b := &Bot{
-		api:    api,
-		Docker: dockerSvc,
+		api:     api,
+		Docker:  dockerSvc,
 		ChatIDs: chatIDs,
-		states: make(map[int64]*State),
+		states:  make(map[int64]*State),
 	}
 	b.notifier = &telegramNotifier{api: api}
 	return b, nil

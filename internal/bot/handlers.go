@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/HarkushaVlad/docker-monitor-bot/internal/docker"
+	"github.com/HarkushaVlad/docker-monitor-bot/internal/utils"
 )
 
 type viewType string
@@ -42,6 +44,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdStart(chatID, state)
 	case "check":
 		b.cmdCheck(chatID, state)
+	case "ignore":
+		b.cmdIgnore(chatID, state, msg.CommandArguments())
 	case "list":
 		if state.LastMessageID != 0 {
 			b.notifier.DeleteMessage(chatID, state.LastMessageID)
@@ -59,15 +63,16 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
-	b.notifier.AnswerCallbackQuery(query.ID, "")
-
 	switch {
 	case data == "back":
+		b.notifier.AnswerCallbackQuery(query.ID, "")
 		b.handleBack(chatID, state)
 	case data == "refresh":
+		b.notifier.AnswerCallbackQuery(query.ID, "")
 		b.refreshView(chatID, state)
 
 	case strings.HasPrefix(data, "proj:"):
+		b.notifier.AnswerCallbackQuery(query.ID, "")
 		idx := 0
 		fmt.Sscanf(strings.TrimPrefix(data, "proj:"), "%d", &idx)
 		if name, ok := state.ProjectMap[idx]; ok {
@@ -77,15 +82,20 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 		}
 
 	case strings.HasPrefix(data, "cnt:"):
+		b.notifier.AnswerCallbackQuery(query.ID, "")
 		shortID := strings.TrimPrefix(data, "cnt:")
 		state.View = viewContainer
 		b.showContainerDetail(chatID, shortID, state)
 
 	case strings.HasPrefix(data, "act:"):
+		b.notifier.AnswerCallbackQuery(query.ID, "")
 		b.handleContainerAction(chatID, data, state)
 
 	case strings.HasPrefix(data, "pact:"):
+		b.notifier.AnswerCallbackQuery(query.ID, "")
 		b.handleProjectAction(chatID, data, state)
+	default:
+		b.notifier.AnswerCallbackQuery(query.ID, "")
 	}
 }
 
@@ -95,7 +105,8 @@ func (b *Bot) cmdStart(chatID int64, state *State) {
 	text := "👋 <b>Docker Monitor</b>\n\n" +
 		"<b>Commands:</b>\n" +
 		"/check — quick status overview\n" +
-		"/list — interactive container management"
+		"/list — interactive container management\n" +
+		"/ignore — manage log ignore rules"
 
 	if state.LastMessageID != 0 {
 		b.notifier.DeleteMessage(chatID, state.LastMessageID)
@@ -144,6 +155,70 @@ func (b *Bot) cmdCheck(chatID int64, state *State) {
 	}
 
 	b.sendOrEdit(chatID, state, sb.String())
+}
+
+func (b *Bot) cmdIgnore(chatID int64, state *State, args string) {
+	args = strings.TrimSpace(args)
+	if args == "" || strings.EqualFold(args, "help") {
+		b.sendOrEdit(chatID, state, ignoreHelpText())
+		return
+	}
+
+	parts := strings.Fields(args)
+	if len(parts) == 0 {
+		b.sendOrEdit(chatID, state, ignoreHelpText())
+		return
+	}
+
+	switch strings.ToLower(parts[0]) {
+	case "list":
+		b.sendOrEdit(chatID, state, b.formatIgnoreRules())
+	case "add":
+		rest := strings.TrimSpace(strings.TrimPrefix(args, parts[0]))
+		scope, match, err := parseIgnoreAddArgs(rest)
+		if err != nil {
+			b.sendOrEditError(chatID, state, err.Error())
+			return
+		}
+
+		rule, err := b.Docker.AddLogIgnoreRule(scope, match)
+		if err != nil {
+			b.sendOrEditError(chatID, state, fmt.Sprintf("Failed to add ignore rule: %v", err))
+			return
+		}
+
+		b.sendOrEdit(chatID, state, fmt.Sprintf(
+			"✅ <b>Ignore rule added</b>\n\nID: <code>%d</code>\nScope: <code>%s</code>\nMatch: <code>%s</code>",
+			rule.ID,
+			utils.EscapeHTML(rule.ScopeSpec()),
+			utils.EscapeHTML(rule.Match),
+		))
+	case "remove", "delete", "del":
+		if len(parts) < 2 {
+			b.sendOrEditError(chatID, state, "Rule ID is required. Example: /ignore remove 2")
+			return
+		}
+
+		id, err := strconv.Atoi(parts[1])
+		if err != nil || id <= 0 {
+			b.sendOrEditError(chatID, state, "Rule ID must be a positive number")
+			return
+		}
+
+		deleted, err := b.Docker.DeleteLogIgnoreRule(id)
+		if err != nil {
+			b.sendOrEditError(chatID, state, fmt.Sprintf("Failed to remove ignore rule: %v", err))
+			return
+		}
+		if !deleted {
+			b.sendOrEditError(chatID, state, fmt.Sprintf("Ignore rule %d not found", id))
+			return
+		}
+
+		b.sendOrEdit(chatID, state, fmt.Sprintf("✅ Ignore rule <code>%d</code> removed", id))
+	default:
+		b.sendOrEdit(chatID, state, ignoreHelpText())
+	}
 }
 
 // --- Views ---
@@ -515,4 +590,63 @@ func actionVerb(action string) string {
 		}
 		return s
 	}
+}
+
+func parseIgnoreAddArgs(args string) (string, string, error) {
+	parts := strings.SplitN(args, "|", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("Use format: /ignore add scope | text")
+	}
+
+	scope := strings.TrimSpace(parts[0])
+	match := strings.TrimSpace(parts[1])
+	if scope == "" {
+		return "", "", fmt.Errorf("Ignore scope is required")
+	}
+	if match == "" {
+		return "", "", fmt.Errorf("Ignore text is required")
+	}
+
+	if !strings.Contains(scope, ":") && strings.Contains(scope, "/") {
+		scope = "service:" + scope
+	} else if !strings.Contains(scope, ":") && !strings.EqualFold(scope, "global") && scope != "*" {
+		scope = "container:" + scope
+	}
+
+	return scope, match, nil
+}
+
+func ignoreHelpText() string {
+	return "🛠 <b>Log Ignore Rules</b>\n\n" +
+		"<b>Commands:</b>\n" +
+		"/ignore list\n" +
+		"/ignore add any-sync-bundle | unable to connect\n" +
+		"/ignore add any-sync-bundle/any-sync-bundle | space is missing\n" +
+		"/ignore add global | unable to connect\n" +
+		"/ignore add project:any-sync-bundle | space is missing\n" +
+		"/ignore add service:any-sync-bundle/any-sync-bundle | unable to connect\n" +
+		"/ignore add container:portainer | harmless warning\n" +
+		"/ignore remove 2\n\n" +
+		"<b>Default:</b> <code>name</code> means <code>container:name</code>, and <code>project/service</code> means <code>service:project/service</code>.\n" +
+		"<b>Scope types:</b> global, project:&lt;name&gt;, service:&lt;project/service&gt;, container:&lt;name&gt;"
+}
+
+func (b *Bot) formatIgnoreRules() string {
+	rules := b.Docker.ListLogIgnoreRules()
+	if len(rules) == 0 {
+		return "🧹 <b>No log ignore rules configured</b>\n\nUse <code>/ignore add scope | text</code> to add one."
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🧹 <b>Log Ignore Rules</b>\n")
+	for _, rule := range rules {
+		sb.WriteString(fmt.Sprintf(
+			"\n<code>%d</code>. <code>%s</code>\nMatch: <code>%s</code>\n",
+			rule.ID,
+			utils.EscapeHTML(rule.ScopeSpec()),
+			utils.EscapeHTML(rule.Match),
+		))
+	}
+
+	return sb.String()
 }

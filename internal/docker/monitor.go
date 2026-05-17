@@ -199,6 +199,25 @@ func (s *Service) scanContainerLogs(ctx context.Context, c types.Container, chat
 		displayName = fmt.Sprintf("%s / %s", project, service)
 	}
 
+	logCtx := LogContext{
+		ContainerName: name,
+		ProjectName:   project,
+		ServiceName:   service,
+		DisplayName:   displayName,
+	}
+
+	filteredGroups := make([][]string, 0, len(groups))
+	for _, group := range groups {
+		if s.ignoreStore != nil && s.ignoreStore.ShouldIgnore(logCtx, group) {
+			continue
+		}
+		filteredGroups = append(filteredGroups, group)
+	}
+	if len(filteredGroups) == 0 {
+		return
+	}
+	groups = filteredGroups
+
 	if len(groups) > 3 {
 		groups = groups[:3]
 	}

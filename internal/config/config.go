@@ -11,10 +11,11 @@ import (
 )
 
 type Config struct {
-	TelegramBotToken string
-	TelegramChatIDs  []int64
-	DockerHost       string
-	PollInterval     time.Duration
+	TelegramBotToken   string
+	TelegramChatIDs    []int64
+	DockerHost         string
+	PollInterval       time.Duration
+	LogIgnoreRulesFile string
 }
 
 func Load() (*Config, error) {
@@ -59,10 +60,16 @@ func Load() (*Config, error) {
 		dockerHost = "unix:///var/run/docker.sock"
 	}
 
+	logIgnoreRulesFile := os.Getenv("LOG_IGNORE_RULES_FILE")
+	if logIgnoreRulesFile == "" {
+		logIgnoreRulesFile = "log-ignore-rules.json"
+	}
+
 	return &Config{
-		TelegramBotToken: token,
-		TelegramChatIDs:  chatIDs,
-		DockerHost:       dockerHost,
-		PollInterval:     pollInterval,
+		TelegramBotToken:   token,
+		TelegramChatIDs:    chatIDs,
+		DockerHost:         dockerHost,
+		PollInterval:       pollInterval,
+		LogIgnoreRulesFile: logIgnoreRulesFile,
 	}, nil
 }

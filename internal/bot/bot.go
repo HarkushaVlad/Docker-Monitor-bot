@@ -70,7 +70,9 @@ func (b *Bot) Run() {
 			}
 		case update.Message != nil && update.Message.IsCommand():
 			if b.IsAllowed(update.Message.Chat.ID) {
-				b.notifier.DeleteMessage(update.Message.Chat.ID, update.Message.MessageID)
+				if update.Message.Command() != "ignore" {
+					b.notifier.DeleteMessage(update.Message.Chat.ID, update.Message.MessageID)
+				}
 				b.handleCommand(update.Message)
 			}
 		case update.Message != nil && !update.Message.IsCommand():

@@ -112,14 +112,14 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 		if name, ok := state.ProjectMap[idx]; ok {
 			state.ProjectName = name
 			state.View = viewProject
-			b.showProjectView(chatID, state)
+			b.showProjectViewMode(chatID, state, true)
 		}
 
 	case strings.HasPrefix(data, "cnt:"):
 		b.notifier.AnswerCallbackQuery(query.ID, "")
 		shortID := strings.TrimPrefix(data, "cnt:")
 		state.View = viewContainer
-		b.showContainerDetail(chatID, shortID, state)
+		b.showContainerDetailMode(chatID, shortID, state, true)
 
 	case strings.HasPrefix(data, "act:"):
 		b.notifier.AnswerCallbackQuery(query.ID, "")
@@ -277,15 +277,19 @@ func (b *Bot) cmdIgnore(chatID int64, state *State, args string) {
 }
 
 func (b *Bot) showMainList(chatID int64, state *State) {
+	b.showMainListMode(chatID, state, false)
+}
+
+func (b *Bot) showMainListMode(chatID int64, state *State, editExisting bool) {
 	ctx := context.Background()
 	groups, err := b.Docker.GetContainerGroups(ctx)
 	if err != nil {
-		b.sendOrEditError(chatID, state, "Failed to fetch containers")
+		b.sendOrEditErrorMode(chatID, state, "Failed to fetch containers", editExisting)
 		return
 	}
 
 	if len(groups.Projects) == 0 && len(groups.Standalone) == 0 {
-		b.sendOrEdit(chatID, state, "🔍 <b>No containers found</b>")
+		b.sendOrEditMode(chatID, state, "🔍 <b>No containers found</b>", editExisting)
 		return
 	}
 
@@ -345,14 +349,18 @@ func (b *Bot) showMainList(chatID int64, state *State) {
 	msgText := fmt.Sprintf("📦 <b>Docker Services</b>\n\n🗂 Compose projects: %d\n📦 Standalone: %d",
 		totalProjects, totalStandalone)
 
-	b.replaceListMessage(chatID, state, msgText, keyboard)
+	b.replaceListMessage(chatID, state, msgText, keyboard, editExisting)
 }
 
 func (b *Bot) showProjectView(chatID int64, state *State) {
+	b.showProjectViewMode(chatID, state, false)
+}
+
+func (b *Bot) showProjectViewMode(chatID int64, state *State, editExisting bool) {
 	ctx := context.Background()
 	groups, err := b.Docker.GetContainerGroups(ctx)
 	if err != nil {
-		b.sendOrEditError(chatID, state, "Failed to fetch containers")
+		b.sendOrEditErrorMode(chatID, state, "Failed to fetch containers", editExisting)
 		return
 	}
 
@@ -364,7 +372,7 @@ func (b *Bot) showProjectView(chatID int64, state *State) {
 		}
 	}
 	if proj == nil {
-		b.sendOrEditError(chatID, state, "Project not found")
+		b.sendOrEditErrorMode(chatID, state, "Project not found", editExisting)
 		return
 	}
 
@@ -402,20 +410,24 @@ func (b *Bot) showProjectView(chatID int64, state *State) {
 	msgText := fmt.Sprintf("🗂 <b>%s</b>\n\nServices: %d | Running: %d/%d",
 		proj.Name, total, running, total)
 
-	b.replaceListMessage(chatID, state, msgText, keyboard)
+	b.replaceListMessage(chatID, state, msgText, keyboard, editExisting)
 }
 
 func (b *Bot) showContainerDetail(chatID int64, shortID string, state *State) {
+	b.showContainerDetailMode(chatID, shortID, state, false)
+}
+
+func (b *Bot) showContainerDetailMode(chatID int64, shortID string, state *State, editExisting bool) {
 	fullID, ok := state.ShortIDMap[shortID]
 	if !ok {
-		b.sendOrEditError(chatID, state, "Container not found")
+		b.sendOrEditErrorMode(chatID, state, "Container not found", editExisting)
 		return
 	}
 
 	ctx := context.Background()
 	info, err := b.Docker.ContainerInspect(ctx, fullID)
 	if err != nil {
-		b.sendOrEditError(chatID, state, "Container not found")
+		b.sendOrEditErrorMode(chatID, state, "Container not found", editExisting)
 		return
 	}
 
@@ -464,7 +476,7 @@ func (b *Bot) showContainerDetail(chatID int64, shortID string, state *State) {
 
 	keyboard := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
 
-	b.replaceListMessage(chatID, state, sb.String(), keyboard)
+	b.replaceListMessage(chatID, state, sb.String(), keyboard, editExisting)
 }
 
 func (b *Bot) handleContainerAction(chatID int64, data string, state *State) {
@@ -477,7 +489,7 @@ func (b *Bot) handleContainerAction(chatID int64, data string, state *State) {
 
 	fullID, ok := state.ShortIDMap[shortID]
 	if !ok {
-		b.sendOrEditError(chatID, state, "Container not found")
+		b.sendOrEditErrorMode(chatID, state, "Container not found", editExistingList(state))
 		return
 	}
 
@@ -496,13 +508,13 @@ func (b *Bot) handleContainerAction(chatID int64, data string, state *State) {
 	}
 
 	if err != nil {
-		b.sendOrEditError(chatID, state, fmt.Sprintf("Failed to %s: %v", action, err))
+		b.sendOrEditErrorMode(chatID, state, fmt.Sprintf("Failed to %s: %v", action, err), editExistingList(state))
 		return
 	}
 
 	time.Sleep(500 * time.Millisecond)
 
-	b.showContainerDetail(chatID, shortID, state)
+	b.showContainerDetailMode(chatID, shortID, state, true)
 }
 
 func (b *Bot) findProject(ctx context.Context, name string) (*docker.ComposeProject, error) {
@@ -523,7 +535,7 @@ func (b *Bot) handleProjectAction(chatID int64, data string, state *State) {
 	projectName := state.ProjectName
 
 	if projectName == "" {
-		b.sendOrEditError(chatID, state, "No project selected")
+		b.sendOrEditErrorMode(chatID, state, "No project selected", editExistingList(state))
 		return
 	}
 
@@ -531,13 +543,15 @@ func (b *Bot) handleProjectAction(chatID int64, data string, state *State) {
 
 	proj, err := b.findProject(ctx, projectName)
 	if err != nil {
-		b.sendOrEditError(chatID, state, fmt.Sprintf("Failed to find project: %v", err))
+		b.sendOrEditErrorMode(chatID, state, fmt.Sprintf("Failed to find project: %v", err), editExistingList(state))
 		return
 	}
 
 	verb := actionVerb(action)
-	b.notifier.EditMessageText(chatID, state.LastMessageID,
-		fmt.Sprintf("⏳ <b>%s %s...</b>", verb, projectName))
+	if state.LastMessageID != 0 {
+		b.notifier.EditMessageText(chatID, state.LastMessageID,
+			fmt.Sprintf("⏳ <b>%s %s...</b>", verb, projectName))
+	}
 
 	switch action {
 	case "start":
@@ -553,13 +567,13 @@ func (b *Bot) handleProjectAction(chatID int64, data string, state *State) {
 	}
 
 	if err != nil {
-		b.sendOrEditError(chatID, state, fmt.Sprintf("Failed to %s project: %v", action, err))
+		b.sendOrEditErrorMode(chatID, state, fmt.Sprintf("Failed to %s project: %v", action, err), editExistingList(state))
 		return
 	}
 
 	time.Sleep(time.Second)
 
-	b.showProjectView(chatID, state)
+	b.showProjectViewMode(chatID, state, true)
 }
 
 func (b *Bot) handleBack(chatID int64, state *State) {
@@ -567,31 +581,48 @@ func (b *Bot) handleBack(chatID int64, state *State) {
 	case viewContainer:
 		if state.ProjectName != "" {
 			state.View = viewProject
-			b.showProjectView(chatID, state)
+			b.showProjectViewMode(chatID, state, true)
 		} else {
 			state.View = viewMain
-			b.showMainList(chatID, state)
+			b.showMainListMode(chatID, state, true)
 		}
 	case viewProject:
 		state.View = viewMain
 		state.ProjectName = ""
-		b.showMainList(chatID, state)
+		b.showMainListMode(chatID, state, true)
 	default:
 		state.View = viewMain
-		b.showMainList(chatID, state)
+		b.showMainListMode(chatID, state, true)
 	}
 }
 
 func (b *Bot) refreshView(chatID int64, state *State) {
 	switch state.View {
 	case viewProject:
-		b.showProjectView(chatID, state)
+		b.showProjectViewMode(chatID, state, true)
+	case viewContainer:
+		shortID := ""
+		for currentShortID, fullID := range state.ShortIDMap {
+			if fullID == state.ContainerID {
+				shortID = currentShortID
+				break
+			}
+		}
+		if shortID != "" {
+			b.showContainerDetailMode(chatID, shortID, state, true)
+			return
+		}
+		b.showMainListMode(chatID, state, true)
 	default:
-		b.showMainList(chatID, state)
+		b.showMainListMode(chatID, state, true)
 	}
 }
 
-func (b *Bot) replaceListMessage(chatID int64, state *State, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
+func (b *Bot) replaceListMessage(chatID int64, state *State, text string, keyboard tgbotapi.InlineKeyboardMarkup, editExisting bool) {
+	if editExisting && state.LastMessageID != 0 {
+		b.notifier.EditMessageWithKeyboard(chatID, state.LastMessageID, text, keyboard)
+		return
+	}
 	if state.LastMessageID != 0 {
 		b.notifier.DeleteMessage(chatID, state.LastMessageID)
 		state.LastMessageID = 0
@@ -600,6 +631,14 @@ func (b *Bot) replaceListMessage(chatID int64, state *State, text string, keyboa
 }
 
 func (b *Bot) sendOrEdit(chatID int64, state *State, text string) {
+	b.sendOrEditMode(chatID, state, text, false)
+}
+
+func (b *Bot) sendOrEditMode(chatID int64, state *State, text string, editExisting bool) {
+	if editExisting && state.LastMessageID > 0 {
+		b.notifier.EditMessageText(chatID, state.LastMessageID, text)
+		return
+	}
 	if state.LastMessageID > 0 {
 		b.notifier.DeleteMessage(chatID, state.LastMessageID)
 		state.LastMessageID = 0
@@ -608,7 +647,15 @@ func (b *Bot) sendOrEdit(chatID int64, state *State, text string) {
 }
 
 func (b *Bot) sendOrEditError(chatID int64, state *State, text string) {
-	b.sendOrEdit(chatID, state, "❌ "+text)
+	b.sendOrEditErrorMode(chatID, state, text, false)
+}
+
+func (b *Bot) sendOrEditErrorMode(chatID int64, state *State, text string, editExisting bool) {
+	b.sendOrEditMode(chatID, state, "❌ "+text, editExisting)
+}
+
+func editExistingList(state *State) bool {
+	return state.LastMessageID != 0
 }
 
 func statusIcon(state string) string {

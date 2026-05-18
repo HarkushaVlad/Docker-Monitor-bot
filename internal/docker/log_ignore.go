@@ -285,3 +285,7 @@ func ruleMatchesContext(rule LogIgnoreRule, ctx LogContext) bool {
 		return false
 	}
 }
+
+func RuleMatchesContext(rule LogIgnoreRule, ctx LogContext) bool {
+	return ruleMatchesContext(rule, ctx)
+}

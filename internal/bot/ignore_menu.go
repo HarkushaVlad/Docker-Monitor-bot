@@ -28,30 +28,44 @@ func (b *Bot) listContainersForIgnore(ctx context.Context) ([]containerIgnoreEnt
 
 	rules := b.Docker.ListLogIgnoreRules()
 
-	countByName := make(map[string]int)
-	for _, r := range rules {
-		if r.ScopeType == "container" {
-			countByName[strings.ToLower(r.ScopeValue)]++
-		}
-	}
-
 	entries := make([]containerIgnoreEntry, 0, len(containers))
 	for _, c := range containers {
 		name := utils.ContainerName(c)
+		project := c.Labels[docker.LabelComposeProject]
+		service := c.Labels[docker.LabelComposeService]
+		logCtx := docker.LogContext{
+			ContainerName: name,
+			ProjectName:   project,
+			ServiceName:   service,
+		}
+
+		ignoreCount := 0
+		for _, r := range rules {
+			if docker.RuleMatchesContext(r, logCtx) {
+				ignoreCount++
+			}
+		}
+
 		entries = append(entries, containerIgnoreEntry{
 			displayName:   docker.ServiceName(c),
 			containerName: name,
-			ignoreCount:   countByName[strings.ToLower(name)],
+			ignoreCount:   ignoreCount,
 		})
 	}
 	return entries, nil
 }
 
 func (b *Bot) rulesForContainer(containerName string) []docker.LogIgnoreRule {
+	ctx := context.Background()
+	logCtx, err := b.Docker.ContainerIgnoreContext(ctx, containerName)
+	if err != nil {
+		return nil
+	}
+
 	all := b.Docker.ListLogIgnoreRules()
 	var result []docker.LogIgnoreRule
 	for _, r := range all {
-		if r.ScopeType == "container" && strings.EqualFold(r.ScopeValue, containerName) {
+		if docker.RuleMatchesContext(r, *logCtx) {
 			result = append(result, r)
 		}
 	}
@@ -59,6 +73,10 @@ func (b *Bot) rulesForContainer(containerName string) []docker.LogIgnoreRule {
 }
 
 func (b *Bot) showIgnoreList(chatID int64, state *State) {
+	b.showIgnoreListMode(chatID, state, false)
+}
+
+func (b *Bot) showIgnoreListMode(chatID int64, state *State, editExisting bool) {
 	ctx := context.Background()
 	entries, err := b.listContainersForIgnore(ctx)
 	if err != nil {
@@ -87,10 +105,14 @@ func (b *Bot) showIgnoreList(chatID int64, state *State) {
 	keyboard := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
 	text := "🧹 <b>Log Ignore Rules</b>\n\nSelect a container to manage its ignore rules:"
 
-	b.replaceIgnoreMenuMessage(chatID, state, text, keyboard)
+	b.replaceIgnoreMenuMessage(chatID, state, text, keyboard, editExisting)
 }
 
 func (b *Bot) showContainerIgnoreList(chatID int64, state *State, containerName string, page int) {
+	b.showContainerIgnoreListMode(chatID, state, containerName, page, false)
+}
+
+func (b *Bot) showContainerIgnoreListMode(chatID int64, state *State, containerName string, page int, editExisting bool) {
 	rules := b.rulesForContainer(containerName)
 
 	state.IgnoreContainerName = containerName
@@ -153,10 +175,14 @@ func (b *Bot) showContainerIgnoreList(chatID int64, state *State, containerName 
 	)
 
 	keyboard := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
-	b.replaceIgnoreMenuMessage(chatID, state, sb.String(), keyboard)
+	b.replaceIgnoreMenuMessage(chatID, state, sb.String(), keyboard, editExisting)
 }
 
 func (b *Bot) showIgnoreRuleDetail(chatID int64, state *State, ruleID int) {
+	b.showIgnoreRuleDetailMode(chatID, state, ruleID, false)
+}
+
+func (b *Bot) showIgnoreRuleDetailMode(chatID int64, state *State, ruleID int, editExisting bool) {
 	rules := b.Docker.ListLogIgnoreRules()
 	var found *docker.LogIgnoreRule
 	for i := range rules {
@@ -186,17 +212,25 @@ func (b *Bot) showIgnoreRuleDetail(chatID int64, state *State, ruleID int) {
 		),
 	}}
 
-	b.replaceIgnoreMenuMessage(chatID, state, text, keyboard)
+	b.replaceIgnoreMenuMessage(chatID, state, text, keyboard, editExisting)
 }
 
 func (b *Bot) enterPendingIgnore(chatID int64, state *State) {
+	b.enterPendingIgnoreMode(chatID, state, false)
+}
+
+func (b *Bot) enterPendingIgnoreMode(chatID int64, state *State, editExisting bool) {
 	containerName := state.IgnoreContainerName
 	text := fmt.Sprintf(
 		"⌨️ <b>Add Ignore Rule</b>\n\nContainer: <code>%s</code>\n\nSend the text to match (substring, case-insensitive).\nSend /cancel to cancel.",
 		utils.EscapeHTML(containerName),
 	)
-	b.deleteIgnoreMenuMessage(chatID, state)
-	state.IgnoreMenuMessageID = b.notifier.SendText(chatID, text)
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("↩️ Back", "ig:backtolist"),
+		),
+	)
+	b.replaceIgnoreMenuMessage(chatID, state, text, keyboard, editExisting)
 	state.PendingIgnoreContainerName = containerName
 }
 
@@ -215,7 +249,6 @@ func (b *Bot) handlePendingIgnoreText(chatID int64, state *State, text string) b
 
 	containerName := state.PendingIgnoreContainerName
 	state.PendingIgnoreContainerName = ""
-	b.deleteIgnoreMenuMessage(chatID, state)
 
 	scopeSpec := "container:" + containerName
 	rule, err := b.Docker.AddLogIgnoreRule(scopeSpec, text)
@@ -230,11 +263,16 @@ func (b *Bot) handlePendingIgnoreText(chatID int64, state *State, text string) b
 		))
 	}
 
-	b.showContainerIgnoreList(chatID, state, containerName, 0)
+	b.showContainerIgnoreListMode(chatID, state, containerName, 0, true)
 	return true
 }
 
-func (b *Bot) replaceIgnoreMenuMessage(chatID int64, state *State, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
+func (b *Bot) replaceIgnoreMenuMessage(chatID int64, state *State, text string, keyboard tgbotapi.InlineKeyboardMarkup, editExisting bool) {
+	if editExisting && state.IgnoreMenuMessageID != 0 {
+		b.notifier.EditMessageWithKeyboard(chatID, state.IgnoreMenuMessageID, text, keyboard)
+		return
+	}
+
 	b.deleteIgnoreMenuMessage(chatID, state)
 	state.IgnoreMenuMessageID = b.notifier.SendTextWithKeyboard(chatID, text, keyboard)
 }
@@ -249,16 +287,16 @@ func (b *Bot) deleteIgnoreMenuMessage(chatID int64, state *State) {
 func (b *Bot) handleIgnoreCallback(chatID int64, data string, state *State) {
 	switch {
 	case data == "ig:refresh":
-		b.showIgnoreList(chatID, state)
+		b.showIgnoreListMode(chatID, state, true)
 
 	case data == "ig:back":
-		b.showIgnoreList(chatID, state)
+		b.showIgnoreListMode(chatID, state, true)
 
 	case data == "ig:backtolist":
-		b.showContainerIgnoreList(chatID, state, state.IgnoreContainerName, state.IgnoreListPage)
+		b.showContainerIgnoreListMode(chatID, state, state.IgnoreContainerName, state.IgnoreListPage, true)
 
 	case data == "igadd":
-		b.enterPendingIgnore(chatID, state)
+		b.enterPendingIgnoreMode(chatID, state, true)
 
 	case data == "noop":
 
@@ -273,21 +311,21 @@ func (b *Bot) handleIgnoreCallback(chatID int64, data string, state *State) {
 			b.notifier.SendText(chatID, "❌ Container not found")
 			return
 		}
-		b.showContainerIgnoreList(chatID, state, containerName, 0)
+		b.showContainerIgnoreListMode(chatID, state, containerName, 0, true)
 
 	case strings.HasPrefix(data, "igpage:"):
 		page, err := strconv.Atoi(strings.TrimPrefix(data, "igpage:"))
 		if err != nil {
 			return
 		}
-		b.showContainerIgnoreList(chatID, state, state.IgnoreContainerName, page)
+		b.showContainerIgnoreListMode(chatID, state, state.IgnoreContainerName, page, true)
 
 	case strings.HasPrefix(data, "igrule:"):
 		ruleID, err := strconv.Atoi(strings.TrimPrefix(data, "igrule:"))
 		if err != nil || ruleID <= 0 {
 			return
 		}
-		b.showIgnoreRuleDetail(chatID, state, ruleID)
+		b.showIgnoreRuleDetailMode(chatID, state, ruleID, true)
 
 	case strings.HasPrefix(data, "igdel:"):
 		ruleID, err := strconv.Atoi(strings.TrimPrefix(data, "igdel:"))
@@ -327,7 +365,7 @@ func (b *Bot) handleIgnoreDelete(chatID int64, state *State, ruleID int) {
 		))
 	}
 
-	b.showContainerIgnoreList(chatID, state, state.IgnoreContainerName, state.IgnoreListPage)
+	b.showContainerIgnoreListMode(chatID, state, state.IgnoreContainerName, state.IgnoreListPage, true)
 }
 
 func truncate(s string, max int) string {

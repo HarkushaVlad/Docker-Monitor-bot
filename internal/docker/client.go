@@ -65,6 +65,35 @@ func (s *Service) DeleteLogIgnoreRule(id int) (bool, error) {
 	return s.ignoreStore.Delete(id)
 }
 
+func (s *Service) ContainerIgnoreContext(ctx context.Context, containerName string) (*LogContext, error) {
+	containers, err := s.ListUserContainers(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, c := range containers {
+		if !strings.EqualFold(utils.ContainerName(c), containerName) {
+			continue
+		}
+
+		project := c.Labels[LabelComposeProject]
+		service := c.Labels[LabelComposeService]
+		displayName := utils.ContainerName(c)
+		if project != "" && service != "" {
+			displayName = project + " / " + service
+		}
+
+		return &LogContext{
+			ContainerName: utils.ContainerName(c),
+			ProjectName:   project,
+			ServiceName:   service,
+			DisplayName:   displayName,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("container %q not found", containerName)
+}
+
 type ComposeProject struct {
 	Name       string
 	WorkingDir string

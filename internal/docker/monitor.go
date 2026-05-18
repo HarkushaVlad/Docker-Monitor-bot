@@ -80,7 +80,7 @@ func (s *Service) handleContainerEvent(event events.Message, chatIDs []int64, no
 
 type logTracker struct {
 	mu          sync.Mutex
-	lastChecked map[string]time.Time // container ID -> last checked time
+	lastChecked map[string]time.Time
 }
 
 var (

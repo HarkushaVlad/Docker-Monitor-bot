@@ -25,6 +25,10 @@ func main() {
 		log.Fatalf("Failed to init Telegram bot: %v", err)
 	}
 
+	if err := b.RegisterCommands(); err != nil {
+		log.Printf("Warning: failed to register bot commands: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

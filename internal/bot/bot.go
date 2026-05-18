@@ -43,6 +43,20 @@ func (b *Bot) Notifier() notification.Notifier {
 	return b.notifier
 }
 
+func (b *Bot) RegisterCommands() error {
+	commands := []tgbotapi.BotCommand{
+		{Command: "start", Description: "Show help and available commands"},
+		{Command: "check", Description: "Quick status overview of all containers"},
+		{Command: "list", Description: "Interactive container management menu"},
+		{Command: "ignore_list", Description: "Manage log ignore rules (interactive menu)"},
+		{Command: "ignore", Description: "Manage log ignore rules via text commands"},
+		{Command: "cancel", Description: "Cancel current pending action"},
+	}
+	cfg := tgbotapi.NewSetMyCommands(commands...)
+	_, err := b.api.Request(cfg)
+	return err
+}
+
 func (b *Bot) Run() {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -58,6 +72,10 @@ func (b *Bot) Run() {
 			if b.IsAllowed(update.Message.Chat.ID) {
 				b.notifier.DeleteMessage(update.Message.Chat.ID, update.Message.MessageID)
 				b.handleCommand(update.Message)
+			}
+		case update.Message != nil && !update.Message.IsCommand():
+			if b.IsAllowed(update.Message.Chat.ID) {
+				b.handleTextMessage(update.Message)
 			}
 		}
 	}
@@ -80,9 +98,10 @@ func (b *Bot) getState(chatID int64) *State {
 		return s
 	}
 	s := &State{
-		View:       viewMain,
-		ShortIDMap: make(map[string]string),
-		ProjectMap: make(map[int]string),
+		View:               viewMain,
+		ShortIDMap:         make(map[string]string),
+		ProjectMap:         make(map[int]string),
+		IgnoreContainerMap: make(map[int]string),
 	}
 	b.states[chatID] = s
 	return s

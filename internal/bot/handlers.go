@@ -31,6 +31,12 @@ type State struct {
 	ContainerID   string
 	ShortIDMap    map[string]string
 	ProjectMap    map[int]string
+
+	IgnoreMenuMessageID        int
+	IgnoreContainerMap         map[int]string
+	IgnoreContainerName        string
+	IgnoreListPage             int
+	PendingIgnoreContainerName string
 }
 
 func (b *Bot) handleCommand(msg *tgbotapi.Message) {
@@ -39,6 +45,11 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
+	wasPending := state.PendingIgnoreContainerName != ""
+	if wasPending {
+		b.cancelPendingIgnore(chatID, state)
+	}
+
 	switch msg.Command() {
 	case "start":
 		b.cmdStart(chatID, state)
@@ -46,6 +57,10 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdCheck(chatID, state)
 	case "ignore":
 		b.cmdIgnore(chatID, state, msg.CommandArguments())
+	case "ignore_list":
+		b.showIgnoreList(chatID, state)
+	case "cancel":
+		b.cancelAllInteractions(chatID, state, wasPending)
 	case "list":
 		if state.LastMessageID != 0 {
 			b.notifier.DeleteMessage(chatID, state.LastMessageID)
@@ -54,6 +69,25 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		state.View = viewMain
 		b.showMainList(chatID, state)
 	}
+}
+
+func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
+	chatID := msg.Chat.ID
+	text := strings.TrimSpace(msg.Text)
+	if text == "" {
+		return
+	}
+
+	state := b.getState(chatID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if state.PendingIgnoreContainerName == "" {
+		return
+	}
+
+	b.notifier.DeleteMessage(chatID, msg.MessageID)
+	b.handlePendingIgnoreText(chatID, state, text)
 }
 
 func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
@@ -94,36 +128,41 @@ func (b *Bot) handleCallback(query *tgbotapi.CallbackQuery) {
 	case strings.HasPrefix(data, "pact:"):
 		b.notifier.AnswerCallbackQuery(query.ID, "")
 		b.handleProjectAction(chatID, data, state)
+
+	case data == "ig:refresh" || data == "ig:back" || data == "ig:backtolist" ||
+		data == "igadd" || data == "noop" ||
+		strings.HasPrefix(data, "igcnt:") || strings.HasPrefix(data, "igpage:") ||
+		strings.HasPrefix(data, "igrule:") || strings.HasPrefix(data, "igdel:"):
+		b.notifier.AnswerCallbackQuery(query.ID, "")
+		b.handleIgnoreCallback(chatID, data, state)
+
 	default:
 		b.notifier.AnswerCallbackQuery(query.ID, "")
 	}
 }
-
-// --- Commands ---
 
 func (b *Bot) cmdStart(chatID int64, state *State) {
 	text := "👋 <b>Docker Monitor</b>\n\n" +
 		"<b>Commands:</b>\n" +
 		"/check — quick status overview\n" +
 		"/list — interactive container management\n" +
-		"/ignore — manage log ignore rules"
+		"/ignore_list — manage log ignore rules\n" +
+		"/ignore — manage ignore rules via text commands\n" +
+		"/cancel — cancel current pending action"
 
-	if state.LastMessageID != 0 {
-		b.notifier.DeleteMessage(chatID, state.LastMessageID)
-	}
-	state.LastMessageID = b.notifier.SendText(chatID, text)
+	b.notifier.SendText(chatID, text)
 }
 
 func (b *Bot) cmdCheck(chatID int64, state *State) {
 	ctx := context.Background()
 	groups, err := b.Docker.GetContainerGroups(ctx)
 	if err != nil {
-		b.sendOrEdit(chatID, state, fmt.Sprintf("❌ Failed to fetch containers: %v", err))
+		b.notifier.SendText(chatID, fmt.Sprintf("❌ Failed to fetch containers: %v", err))
 		return
 	}
 
 	if len(groups.Projects) == 0 && len(groups.Standalone) == 0 {
-		b.sendOrEdit(chatID, state, "🔍 <b>No containers found</b>")
+		b.notifier.SendText(chatID, "🔍 <b>No containers found</b>")
 		return
 	}
 
@@ -154,40 +193,38 @@ func (b *Bot) cmdCheck(chatID int64, state *State) {
 		}
 	}
 
-	b.sendOrEdit(chatID, state, sb.String())
+	b.notifier.SendText(chatID, sb.String())
 }
 
 func (b *Bot) cmdIgnore(chatID int64, state *State, args string) {
 	args = strings.TrimSpace(args)
 	if args == "" || strings.EqualFold(args, "help") {
-		b.sendOrEdit(chatID, state, ignoreHelpText())
+		b.notifier.SendText(chatID, ignoreHelpText())
 		return
 	}
 
 	parts := strings.Fields(args)
 	if len(parts) == 0 {
-		b.sendOrEdit(chatID, state, ignoreHelpText())
+		b.notifier.SendText(chatID, ignoreHelpText())
 		return
 	}
 
 	switch strings.ToLower(parts[0]) {
-	case "list":
-		b.sendOrEdit(chatID, state, b.formatIgnoreRules())
 	case "add":
 		rest := strings.TrimSpace(strings.TrimPrefix(args, parts[0]))
 		scope, match, err := parseIgnoreAddArgs(rest)
 		if err != nil {
-			b.sendOrEditError(chatID, state, err.Error())
+			b.notifier.SendText(chatID, "❌ "+err.Error())
 			return
 		}
 
 		rule, err := b.Docker.AddLogIgnoreRule(scope, match)
 		if err != nil {
-			b.sendOrEditError(chatID, state, fmt.Sprintf("Failed to add ignore rule: %v", err))
+			b.notifier.SendText(chatID, fmt.Sprintf("❌ Failed to add ignore rule: %v", err))
 			return
 		}
 
-		b.sendOrEdit(chatID, state, fmt.Sprintf(
+		b.notifier.SendText(chatID, fmt.Sprintf(
 			"✅ <b>Ignore rule added</b>\n\nID: <code>%d</code>\nScope: <code>%s</code>\nMatch: <code>%s</code>",
 			rule.ID,
 			utils.EscapeHTML(rule.ScopeSpec()),
@@ -195,33 +232,49 @@ func (b *Bot) cmdIgnore(chatID int64, state *State, args string) {
 		))
 	case "remove", "delete", "del":
 		if len(parts) < 2 {
-			b.sendOrEditError(chatID, state, "Rule ID is required. Example: /ignore remove 2")
+			b.notifier.SendText(chatID, "❌ Rule ID is required. Example: /ignore remove 2")
 			return
 		}
 
 		id, err := strconv.Atoi(parts[1])
 		if err != nil || id <= 0 {
-			b.sendOrEditError(chatID, state, "Rule ID must be a positive number")
+			b.notifier.SendText(chatID, "❌ Rule ID must be a positive number")
 			return
+		}
+
+		rules := b.Docker.ListLogIgnoreRules()
+		var found *docker.LogIgnoreRule
+		for i := range rules {
+			if rules[i].ID == id {
+				found = &rules[i]
+				break
+			}
 		}
 
 		deleted, err := b.Docker.DeleteLogIgnoreRule(id)
 		if err != nil {
-			b.sendOrEditError(chatID, state, fmt.Sprintf("Failed to remove ignore rule: %v", err))
+			b.notifier.SendText(chatID, fmt.Sprintf("❌ Failed to remove ignore rule: %v", err))
 			return
 		}
 		if !deleted {
-			b.sendOrEditError(chatID, state, fmt.Sprintf("Ignore rule %d not found", id))
+			b.notifier.SendText(chatID, fmt.Sprintf("❌ Ignore rule %d not found", id))
 			return
 		}
 
-		b.sendOrEdit(chatID, state, fmt.Sprintf("✅ Ignore rule <code>%d</code> removed", id))
+		if found != nil {
+			b.notifier.SendText(chatID, fmt.Sprintf(
+				"✅ <b>Ignore rule deleted</b>\n\nID: <code>%d</code>\nScope: <code>%s</code>\nMatch: <code>%s</code>",
+				found.ID,
+				utils.EscapeHTML(found.ScopeSpec()),
+				utils.EscapeHTML(found.Match),
+			))
+		} else {
+			b.notifier.SendText(chatID, fmt.Sprintf("✅ Ignore rule <code>%d</code> removed", id))
+		}
 	default:
-		b.sendOrEdit(chatID, state, ignoreHelpText())
+		b.notifier.SendText(chatID, ignoreHelpText())
 	}
 }
-
-// --- Views ---
 
 func (b *Bot) showMainList(chatID int64, state *State) {
 	ctx := context.Background()
@@ -292,11 +345,7 @@ func (b *Bot) showMainList(chatID int64, state *State) {
 	msgText := fmt.Sprintf("📦 <b>Docker Services</b>\n\n🗂 Compose projects: %d\n📦 Standalone: %d",
 		totalProjects, totalStandalone)
 
-	if state.LastMessageID == 0 {
-		state.LastMessageID = b.notifier.SendTextWithKeyboard(chatID, msgText, keyboard)
-	} else {
-		b.notifier.EditMessageWithKeyboard(chatID, state.LastMessageID, msgText, keyboard)
-	}
+	b.replaceListMessage(chatID, state, msgText, keyboard)
 }
 
 func (b *Bot) showProjectView(chatID int64, state *State) {
@@ -353,11 +402,7 @@ func (b *Bot) showProjectView(chatID int64, state *State) {
 	msgText := fmt.Sprintf("🗂 <b>%s</b>\n\nServices: %d | Running: %d/%d",
 		proj.Name, total, running, total)
 
-	if state.LastMessageID == 0 {
-		state.LastMessageID = b.notifier.SendTextWithKeyboard(chatID, msgText, keyboard)
-	} else {
-		b.notifier.EditMessageWithKeyboard(chatID, state.LastMessageID, msgText, keyboard)
-	}
+	b.replaceListMessage(chatID, state, msgText, keyboard)
 }
 
 func (b *Bot) showContainerDetail(chatID int64, shortID string, state *State) {
@@ -419,14 +464,8 @@ func (b *Bot) showContainerDetail(chatID int64, shortID string, state *State) {
 
 	keyboard := tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
 
-	if state.LastMessageID == 0 {
-		state.LastMessageID = b.notifier.SendTextWithKeyboard(chatID, sb.String(), keyboard)
-	} else {
-		b.notifier.EditMessageWithKeyboard(chatID, state.LastMessageID, sb.String(), keyboard)
-	}
+	b.replaceListMessage(chatID, state, sb.String(), keyboard)
 }
-
-// --- Actions ---
 
 func (b *Bot) handleContainerAction(chatID int64, data string, state *State) {
 	parts := strings.SplitN(data, ":", 3)
@@ -523,8 +562,6 @@ func (b *Bot) handleProjectAction(chatID int64, data string, state *State) {
 	b.showProjectView(chatID, state)
 }
 
-// --- Navigation ---
-
 func (b *Bot) handleBack(chatID int64, state *State) {
 	switch state.View {
 	case viewContainer:
@@ -554,14 +591,20 @@ func (b *Bot) refreshView(chatID int64, state *State) {
 	}
 }
 
-// --- Helpers ---
+func (b *Bot) replaceListMessage(chatID int64, state *State, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
+	if state.LastMessageID != 0 {
+		b.notifier.DeleteMessage(chatID, state.LastMessageID)
+		state.LastMessageID = 0
+	}
+	state.LastMessageID = b.notifier.SendTextWithKeyboard(chatID, text, keyboard)
+}
 
 func (b *Bot) sendOrEdit(chatID int64, state *State, text string) {
 	if state.LastMessageID > 0 {
-		b.notifier.EditMessageText(chatID, state.LastMessageID, text)
-	} else {
-		state.LastMessageID = b.notifier.SendText(chatID, text)
+		b.notifier.DeleteMessage(chatID, state.LastMessageID)
+		state.LastMessageID = 0
 	}
+	state.LastMessageID = b.notifier.SendText(chatID, text)
 }
 
 func (b *Bot) sendOrEditError(chatID int64, state *State, text string) {
@@ -592,6 +635,29 @@ func actionVerb(action string) string {
 	}
 }
 
+func (b *Bot) cancelAllInteractions(chatID int64, state *State, wasPendingIgnore bool) {
+	cancelled := wasPendingIgnore
+
+	if state.LastMessageID != 0 {
+		b.notifier.DeleteMessage(chatID, state.LastMessageID)
+		state.LastMessageID = 0
+		state.View = viewMain
+		state.ProjectName = ""
+		state.ContainerID = ""
+		cancelled = true
+	}
+
+	if state.IgnoreMenuMessageID != 0 {
+		b.notifier.DeleteMessage(chatID, state.IgnoreMenuMessageID)
+		state.IgnoreMenuMessageID = 0
+		cancelled = true
+	}
+
+	if cancelled {
+		b.notifier.SendText(chatID, "❌ Cancelled.")
+	}
+}
+
 func parseIgnoreAddArgs(args string) (string, string, error) {
 	parts := strings.SplitN(args, "|", 2)
 	if len(parts) != 2 {
@@ -619,7 +685,7 @@ func parseIgnoreAddArgs(args string) (string, string, error) {
 func ignoreHelpText() string {
 	return "🛠 <b>Log Ignore Rules</b>\n\n" +
 		"<b>Commands:</b>\n" +
-		"/ignore list\n" +
+		"/ignore_list — interactive ignore rules menu\n" +
 		"/ignore add any-sync-bundle | unable to connect\n" +
 		"/ignore add any-sync-bundle/any-sync-bundle | space is missing\n" +
 		"/ignore add global | unable to connect\n" +

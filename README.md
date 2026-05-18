@@ -84,7 +84,7 @@ and survive restarts.
 Examples:
 
 ```text
-/ignore list
+/ignore_list
 /ignore add project-name | unable to connect
 /ignore add project-name/project-name | space is missing
 /ignore add global | unable to connect

@@ -114,7 +114,7 @@ func (s *logIgnoreStore) Add(scopeSpec, match string) (LogIgnoreRule, error) {
 		return LogIgnoreRule{}, err
 	}
 
-	match = strings.TrimSpace(match)
+	match = normalizeIgnoreText(match)
 	if match == "" {
 		return LogIgnoreRule{}, fmt.Errorf("match text is required")
 	}
@@ -123,7 +123,7 @@ func (s *logIgnoreStore) Add(scopeSpec, match string) (LogIgnoreRule, error) {
 	defer s.mu.Unlock()
 
 	for _, existing := range s.rules {
-		if existing.ScopeType == scopeType && strings.EqualFold(existing.ScopeValue, scopeValue) && strings.EqualFold(existing.Match, match) {
+		if existing.ScopeType == scopeType && strings.EqualFold(existing.ScopeValue, scopeValue) && normalizeIgnoreText(existing.Match) == match {
 			return existing, nil
 		}
 	}
@@ -179,7 +179,7 @@ func (s *logIgnoreStore) ShouldIgnore(ctx LogContext, group []string) bool {
 		return false
 	}
 
-	joined := strings.ToLower(strings.Join(group, "\n"))
+	joined := normalizeIgnoreText(strings.Join(group, "\n"))
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -188,7 +188,7 @@ func (s *logIgnoreStore) ShouldIgnore(ctx LogContext, group []string) bool {
 		if !ruleMatchesContext(rule, ctx) {
 			continue
 		}
-		if strings.Contains(joined, strings.ToLower(rule.Match)) {
+		if strings.Contains(joined, normalizeIgnoreText(rule.Match)) {
 			return true
 		}
 	}
@@ -288,4 +288,12 @@ func ruleMatchesContext(rule LogIgnoreRule, ctx LogContext) bool {
 
 func RuleMatchesContext(rule LogIgnoreRule, ctx LogContext) bool {
 	return ruleMatchesContext(rule, ctx)
+}
+
+func normalizeIgnoreText(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return ""
+	}
+	return strings.Join(strings.Fields(strings.ReplaceAll(s, "\t", " ")), " ")
 }
